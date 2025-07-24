@@ -1,15 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::io::{self, Write};
 
 use anyhow::Result;
 use bollard::Docker;
 use clap::{Parser, Subcommand};
-use grid::{AppState, CreatePayload, ExecPayload};
+use sos::{AppState, CreatePayload, ExecPayload};
 use tokio::sync::{Mutex, Semaphore};
 
 #[derive(Parser)]
-#[command(name = "grid")]
-#[command(about = "A CLI for managing sandboxed containers")]
+#[command(name = "sos")]
+#[command(about = "A CLI for managing sandboxed containers for shell agents")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -34,6 +35,18 @@ enum Commands {
         server: String,
         #[command(subcommand)]
         action: SandboxCommands,
+    },
+    /// Start an interactive session with a sandbox
+    Session {
+        /// Server URL
+        #[arg(short, long, default_value = "http://localhost:3000")]
+        server: String,
+        /// Container image to use
+        #[arg(short, long, default_value = "ubuntu:latest")]
+        image: String,
+        /// Setup commands to run after container start
+        #[arg(long)]
+        setup: Vec<String>,
     },
 }
 
@@ -80,6 +93,9 @@ async fn main() -> Result<()> {
         Commands::Sandbox { server, action } => {
             sandbox_command(server, action).await
         }
+        Commands::Session { server, image, setup } => {
+            session_command(server, image, setup).await
+        }
     }
 }
 
@@ -95,7 +111,7 @@ async fn serve_command(port: u16, max_sandboxes: usize) -> Result<()> {
         semaphore,
     });
 
-    let app = grid::create_app(state);
+    let app = sos::create_app(state);
 
     let bind_addr = format!("0.0.0.0:{}", port);
     println!("Server listening on {}", bind_addr);
@@ -244,6 +260,121 @@ async fn sandbox_command(server: String, action: SandboxCommands) -> Result<()> 
                 std::process::exit(1);
             }
         }
+    }
+
+    Ok(())
+}
+
+async fn session_command(server: String, image: String, setup: Vec<String>) -> Result<()> {
+    println!("Starting interactive session with image: {}", image);
+    if !setup.is_empty() {
+        println!("Setup commands: {:?}", setup);
+    }
+
+    let client = reqwest::Client::new();
+
+    // Create the sandbox
+    let payload = CreatePayload {
+        image,
+        setup_commands: setup,
+    };
+
+    let response = client
+        .post(&format!("{}/sandboxes", server))
+        .json(&payload)
+        .send()
+        .await?;
+
+    let id = if response.status().is_success() {
+        let result: serde_json::Value = response.json().await?;
+        let id = result["id"].as_str().unwrap().to_string();
+        println!("✓ Sandbox created with ID: {}", id);
+        id
+    } else {
+        let error = response.text().await?;
+        eprintln!("✗ Failed to create sandbox: {}", error);
+        std::process::exit(1);
+    };
+
+    // Start the sandbox
+    println!("Starting sandbox...");
+    let response = client
+        .post(&format!("{}/sandboxes/{}/start", server, id))
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        println!("✓ Sandbox started successfully");
+    } else {
+        let error = response.text().await?;
+        eprintln!("✗ Failed to start sandbox: {}", error);
+        std::process::exit(1);
+    }
+
+    // Enter interactive mode
+    println!("Entering interactive session. Type 'exit' to quit.");
+    println!("Session ID: {}", id);
+    println!("{}", "=".repeat(50));
+
+    loop {
+        print!("\nsandbox:{}> ", &id[..8]); // Show first 8 chars of ID as prompt
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let command = input.trim();
+
+        if command.is_empty() {
+            continue;
+        }
+
+        if command.eq_ignore_ascii_case("exit") || command.eq_ignore_ascii_case("quit") {
+            break;
+        }
+
+        let payload = ExecPayload { command: command.to_string() };
+
+        let response = client
+            .post(&format!("{}/sandboxes/{}/exec", server, id))
+            .json(&payload)
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            let result: serde_json::Value = response.json().await?;
+            let stdout = result["stdout"].as_str().unwrap_or("");
+            let stderr = result["stderr"].as_str().unwrap_or("");
+            let exit_code = result["exit_code"].as_i64().unwrap_or(-1);
+
+            if !stdout.is_empty() {
+                print!("{}", stdout);
+            }
+            if !stderr.is_empty() {
+                eprint!("{}", stderr);
+            }
+            
+            // Don't exit the session on command failure, just show exit code
+            if exit_code != 0 {
+                eprintln!("(exit code: {})", exit_code);
+            }
+        } else {
+            let error = response.text().await?;
+            eprintln!("✗ Failed to execute command: {}", error);
+        }
+    }
+
+    // Clean up the sandbox
+    println!("Stopping and removing sandbox...");
+    let response = client
+        .delete(&format!("{}/sandboxes/{}", server, id))
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        println!("✓ Sandbox session ended");
+    } else {
+        let error = response.text().await?;
+        eprintln!("⚠ Warning: Failed to clean up sandbox: {}", error);
     }
 
     Ok(())

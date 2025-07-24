@@ -765,26 +765,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07e28edb80900c19c28f1072f2e8aeca7fa06b23cd4169cefe1af5aa3260783f"
 
 [[package]]
-name = "grid"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "bollard",
- "bytes 1.10.1",
- "clap",
- "criterion",
- "futures",
- "podman-api",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-test",
- "uuid",
-]
-
-[[package]]
 name = "h2"
 version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1998,6 +1978,26 @@ checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
 dependencies = [
  "libc",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "sos"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bollard",
+ "bytes 1.10.1",
+ "clap",
+ "criterion",
+ "futures",
+ "podman-api",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-test",
+ "uuid",
 ]
 
 [[package]]

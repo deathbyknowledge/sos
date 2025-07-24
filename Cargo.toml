@@ -1,14 +1,14 @@
 [package]
-name = "grid"
+name = "sos"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "grid"
+name = "sos"
 path = "src/lib.rs"
 
 [[bin]]
-name = "grid"
+name = "sos"
 path = "src/main.rs"
 
 [[bench]]
