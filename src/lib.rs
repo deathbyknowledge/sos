@@ -218,6 +218,31 @@ mod handlers {
             ));
         }
 
+        // Check if image exists locally, pull if it doesn't
+        use bollard::query_parameters::CreateImageOptions;
+        use futures::TryStreamExt;
+        
+        // First, try to inspect the image to see if it exists locally
+        match state.docker.inspect_image(&sandbox_guard.image).await {
+            Ok(_) => {
+                // Image exists locally, no need to pull
+            }
+            Err(_) => {
+                // Image doesn't exist locally, pull it
+                let pull_options = Some(CreateImageOptions {
+                    from_image: Some(sandbox_guard.image.clone()),
+                    ..Default::default()
+                });
+
+                let mut pull_stream = state.docker.create_image(pull_options, None, None);
+                while let Some(_) = pull_stream.try_next().await.map_err(|e| {
+                    (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to pull image: {}", e))
+                })? {
+                    // TODO: print progress
+                }
+            }
+        }
+
         let config = ContainerCreateBody {
             image: Some(sandbox_guard.image.clone()),
             cmd: Some(vec!["/bin/bash".to_string(), "-i".to_string()]),
