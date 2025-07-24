@@ -38,7 +38,7 @@ async fn start_test_server() -> String {
     base_url
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn test_sandbox_endpoints_flow() {
     let base_url = start_test_server().await;
     let client = reqwest::Client::new();
@@ -184,7 +184,36 @@ async fn test_sandbox_endpoints_flow() {
         "Stdout should be '/tmp'"
     );
 
-    // Test 6: Stop sandbox
+    // Test 6: Make sure piping works
+    println!("Testing piping...");
+    let exec_payload = json!({
+        "command": "echo \"Hello, World!!\nHow you doing?\" | grep 'Hello' > output.txt && cat output.txt"
+    });
+
+    let response = client
+        .post(&format!("{}/sandboxes/{}/exec", base_url, sandbox_id))
+        .json(&exec_payload)
+        .send()
+        .await
+        .expect("Failed to send exec request");
+
+    assert_eq!(response.status(), 200, "Exec command should return 200");
+
+    let exec_result: serde_json::Value = response
+        .json()
+        .await
+        .expect("Failed to parse exec response");
+    assert_eq!(
+        exec_result["stdout"], "Hello, World!!",
+        "Stdout should be 'Hello, World!'"
+    );
+    assert_eq!(
+        exec_result["exit_code"], 0,
+        "Piping should return exit code 0"
+    );
+
+
+    // Test 7: Stop sandbox
     println!("Testing stop sandbox...");
     let response = client
         .delete(&format!("{}/sandboxes/{}", base_url, sandbox_id))
@@ -195,7 +224,7 @@ async fn test_sandbox_endpoints_flow() {
     assert_eq!(response.status(), 200, "Stop sandbox should return 200");
     println!("Stopped sandbox successfully");
 
-    // Test 7: Try to start already stopped sandbox (should fail)
+    // Test 8: Try to start already stopped sandbox (should fail)
     println!("Testing start non-existent sandbox...");
     let response = client
         .post(&format!("{}/sandboxes/{}/start", base_url, sandbox_id))

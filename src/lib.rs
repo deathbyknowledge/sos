@@ -187,6 +187,8 @@ mod handlers {
         Ok(Json(serde_json::json!({ "id": id })))
     }
 
+    // TODO: we could read from /etc/motd to get a first message after the task.
+    // Could include instructions on custom tools or w/e
     pub async fn start_sandbox(
         Path(id): Path<String>,
         State(state): State<Arc<AppState>>,
@@ -339,9 +341,11 @@ mod handlers {
         sandbox_guard.output_receiver = Some(Mutex::new(rx));
 
         {
+            // `stty -echo` disables stdin from being echoed to the terminal.
+            // `set +H` disables shell history expansion. (e.g. String containing `!!` will not expand to the last command)
             let mut input_guard = sandbox_guard.input.as_ref().unwrap().lock().await;
             input_guard
-                .write_all("stty -echo\n".as_bytes())
+                .write_all("stty -echo; set +H\n".as_bytes())
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         }
@@ -441,7 +445,6 @@ mod handlers {
             .trim()
             .to_string();
 
-
         // Since we're non-tty, stderr is prefixed by `bash: `, so we need to remove that
         let stderr = stderr.trim_start_matches("bash: ").to_string();
 
@@ -530,7 +533,7 @@ mod handlers {
             let sandboxes = state.sandboxes.lock().await;
             sandboxes.values().cloned().collect::<Vec<_>>()
         };
-    
+
         // Now process concurrently without holding global
         let futures: Vec<_> = sandbox_arcs
             .iter()
@@ -549,7 +552,7 @@ mod handlers {
                 }
             })
             .collect();
-    
+
         let sandbox_list = join_all(futures).await;
         Ok(Json(sandbox_list))
     }
