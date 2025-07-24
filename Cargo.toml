@@ -1,0 +1,38 @@
+[package]
+name = "grid"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "grid"
+path = "src/lib.rs"
+
+[[bin]]
+name = "grid"
+path = "src/main.rs"
+
+[[bench]]
+name = "sandbox_performance"
+harness = false
+
+[dependencies]
+anyhow = "1.0.98"
+axum = "0.8.4"
+bollard = "0.19.1"
+bytes = "1.10.1"
+futures = "0.3.31"
+podman-api = "0.10.0"
+serde = "1.0.219"
+serde_json = "1.0.141"
+tokio = "1.46.1"
+uuid = {version = "1.17.0", features = ["v4"]}
+clap = { version = "4.5", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tokio-test = "0.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[profile.test]
+inherits = "release"
