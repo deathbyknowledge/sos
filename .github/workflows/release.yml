@@ -29,6 +29,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Install dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
       - name: Install Rust toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -40,6 +46,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
         env:
           CARGO_TERM_COLOR: always
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
       - name: Archive binary
         shell: bash
