@@ -1,6 +1,7 @@
 # Sea of Simualtion (SoS)
 A service to manage sandboxed containers for shell agents.
 
+![sos.png](sos.png)
 ## Features
 
 - **Server Mode**: Run an HTTP API server for managing sandboxes

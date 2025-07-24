@@ -74,6 +74,9 @@ enum SandboxCommands {
         id: String,
         /// Command to execute
         command: String,
+        /// Whether to execute the command in standalone mode
+        #[arg(short, long, default_value = "false")]
+        standalone: Option<bool>,
     },
     /// Stop and remove a sandbox
     Stop {
@@ -210,10 +213,10 @@ async fn sandbox_command(server: String, action: SandboxCommands) -> Result<()> 
                 std::process::exit(1);
             }
         }
-        SandboxCommands::Exec { id, command } => {
+        SandboxCommands::Exec { id, command, standalone } => {
             println!("Executing command in sandbox {}: {}", id, command);
 
-            let payload = ExecPayload { command };
+            let payload = ExecPayload { command, standalone };
 
             let response = client
                 .post(&format!("{}/sandboxes/{}/exec", server, id))
@@ -332,7 +335,7 @@ async fn session_command(server: String, image: String, setup: Vec<String>) -> R
             break;
         }
 
-        let payload = ExecPayload { command: command.to_string() };
+        let payload = ExecPayload { command: command.to_string(), standalone: None };
 
         let response = client
             .post(&format!("{}/sandboxes/{}/exec", server, id))

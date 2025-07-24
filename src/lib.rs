@@ -43,6 +43,7 @@ pub struct CreatePayload {
 #[derive(Deserialize, serde::Serialize)]
 pub struct ExecPayload {
     pub command: String,
+    pub standalone: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -103,6 +104,100 @@ impl Sandbox {
             }
         }
         Ok(())
+    }
+
+    pub async fn exec_session_cmd(
+        &mut self,
+        docker: &Docker,
+        cmd: String,
+    ) -> Result<(String, String, i64), anyhow::Error> {
+        let command_id = self.command_id.fetch_add(1, Ordering::Relaxed);
+        let stdout_file = format!("/tmp/stdout_{}.txt", command_id);
+        let stderr_file = format!("/tmp/stderr_{}.txt", command_id);
+        let exitcode_file = format!("/tmp/exitcode_{}.txt", command_id);
+        let marker = format!("COMMAND_DONE_{}", command_id);
+
+        let grouped_command = format!("{{ {} ; }}", cmd);
+        let cmd_to_send = format!(
+            "{} > {} 2> {}; echo $? > {}; echo '{}'\n",
+            grouped_command, stdout_file, stderr_file, exitcode_file, marker
+        );
+
+        {
+            let mut input = self
+                .input
+                .as_ref()
+                .ok_or(anyhow!("Sandbox not started"))?
+                .lock()
+                .await;
+            input.write_all(cmd_to_send.as_bytes()).await?;
+        }
+
+        self.read_until_marker(&marker, 20.0).await?;
+
+        // Read all three files in a single exec command with delimiters
+        let combined_cmd = vec![
+            "/bin/bash".to_string(),
+            "-c".to_string(),
+            format!(
+                "echo 'STDOUT_START'; cat {}; echo 'STDOUT_END'; echo 'STDERR_START'; cat {}; echo 'STDERR_END'; echo 'EXITCODE_START'; cat {}; echo 'EXITCODE_END'",
+                stdout_file, stderr_file, exitcode_file
+            ),
+        ];
+
+        let (combined_output, _, exec_exit_code) =
+            self.exec_standalone_cmd(&docker, combined_cmd).await?;
+
+        if exec_exit_code != 0 {
+            return Err(anyhow!("Failed to read output files"));
+        }
+
+        // Parse the combined output
+        let stdout = extract_section(&combined_output, "STDOUT_START", "STDOUT_END")
+            .trim_end_matches('\n')
+            .to_string();
+        let stderr = extract_section(&combined_output, "STDERR_START", "STDERR_END")
+            .trim_end_matches('\n')
+            .to_string();
+        let exit_code_str = extract_section(&combined_output, "EXITCODE_START", "EXITCODE_END")
+            .trim()
+            .to_string();
+
+        // Since we're non-tty, stderr is prefixed by `bash: `, so we need to remove that
+        let stderr = stderr.trim_start_matches("bash: ").to_string();
+
+        // Clean up files
+        let clean_cmd = vec![
+            "rm".to_string(),
+            stdout_file.clone(),
+            stderr_file.clone(),
+            exitcode_file.clone(),
+        ];
+        let exec_config = CreateExecOptions {
+            cmd: Some(clean_cmd),
+            attach_stdout: Some(false),
+            attach_stderr: Some(false),
+            attach_stdin: Some(false),
+            ..Default::default()
+        };
+
+        let cid = self.container_id.as_ref().unwrap();
+        let exec = docker.create_exec(cid, exec_config).await?;
+
+        docker
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: true,
+                    tty: false,
+                    ..Default::default()
+                }),
+            )
+            .await?;
+
+        self.drain(0.5).await?;
+
+        return Ok((stdout, stderr, exit_code_str.parse::<i64>().unwrap_or(-1)));
     }
 
     pub async fn exec_standalone_cmd(
@@ -221,7 +316,7 @@ mod handlers {
         // Check if image exists locally, pull if it doesn't
         use bollard::query_parameters::CreateImageOptions;
         use futures::TryStreamExt;
-        
+
         // First, try to inspect the image to see if it exists locally
         match state.docker.inspect_image(&sandbox_guard.image).await {
             Ok(_) => {
@@ -236,7 +331,10 @@ mod handlers {
 
                 let mut pull_stream = state.docker.create_image(pull_options, None, None);
                 while let Some(_) = pull_stream.try_next().await.map_err(|e| {
-                    (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to pull image: {}", e))
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to pull image: {}", e),
+                    )
                 })? {
                     // TODO: print progress
                 }
@@ -385,7 +483,7 @@ mod handlers {
         Ok(())
     }
 
-    pub async fn exec_session_cmd(
+    pub async fn exec_cmd(
         Path(id): Path<String>,
         State(state): State<Arc<AppState>>,
         Json(payload): Json<ExecPayload>,
@@ -407,117 +505,29 @@ mod handlers {
 
         let mut sandbox_guard = sandbox_arc.lock().await;
 
-        let command_id = sandbox_guard.command_id.fetch_add(1, Ordering::Relaxed);
-        let stdout_file = format!("/tmp/stdout_{}.txt", command_id);
-        let stderr_file = format!("/tmp/stderr_{}.txt", command_id);
-        let exitcode_file = format!("/tmp/exitcode_{}.txt", command_id);
-        let marker = format!("COMMAND_DONE_{}", command_id);
+        let standalone = payload.standalone.unwrap_or(false);
 
-        let grouped_command = format!("{{ {} ; }}", command);
-        let cmd_to_send = format!(
-            "{} > {} 2> {}; echo $? > {}; echo '{}'\n",
-            grouped_command, stdout_file, stderr_file, exitcode_file, marker
-        );
-
-        {
-            let mut input = sandbox_guard
-                .input
-                .as_ref()
-                .ok_or((StatusCode::BAD_REQUEST, "Sandbox not started".to_string()))?
-                .lock()
-                .await;
-            input
-                .write_all(cmd_to_send.as_bytes())
+        if standalone {
+            let (stdout, stderr, exit_code) = sandbox_guard
+                .exec_standalone_cmd(&state.docker, vec![command])
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            return Ok(Json(serde_json::json!({
+                "stdout": stdout,
+                "stderr": stderr,
+                "exit_code": exit_code
+            })));
+        } else {
+            let (stdout, stderr, exit_code) = sandbox_guard
+                .exec_session_cmd(&state.docker, command)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            Ok(Json(serde_json::json!({
+                "stdout": stdout,
+                "stderr": stderr,
+                "exit_code": exit_code
+            })))
         }
-
-        sandbox_guard
-            .read_until_marker(&marker, 20.0)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        // Read all three files in a single exec command with delimiters
-        let combined_cmd = vec![
-            "/bin/bash".to_string(),
-            "-c".to_string(),
-            format!(
-                "echo 'STDOUT_START'; cat {}; echo 'STDOUT_END'; echo 'STDERR_START'; cat {}; echo 'STDERR_END'; echo 'EXITCODE_START'; cat {}; echo 'EXITCODE_END'",
-                stdout_file, stderr_file, exitcode_file
-            ),
-        ];
-
-        let (combined_output, _, exec_exit_code) = sandbox_guard
-            .exec_standalone_cmd(&state.docker, combined_cmd)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        if exec_exit_code != 0 {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to read output files".to_string(),
-            ));
-        }
-
-        // Parse the combined output
-        let stdout = extract_section(&combined_output, "STDOUT_START", "STDOUT_END")
-            .trim_end_matches('\n')
-            .to_string();
-        let stderr = extract_section(&combined_output, "STDERR_START", "STDERR_END")
-            .trim_end_matches('\n')
-            .to_string();
-        let exit_code_str = extract_section(&combined_output, "EXITCODE_START", "EXITCODE_END")
-            .trim()
-            .to_string();
-
-        // Since we're non-tty, stderr is prefixed by `bash: `, so we need to remove that
-        let stderr = stderr.trim_start_matches("bash: ").to_string();
-
-        // Clean up files
-        let clean_cmd = vec![
-            "rm".to_string(),
-            stdout_file.clone(),
-            stderr_file.clone(),
-            exitcode_file.clone(),
-        ];
-        let exec_config = CreateExecOptions {
-            cmd: Some(clean_cmd),
-            attach_stdout: Some(false),
-            attach_stderr: Some(false),
-            attach_stdin: Some(false),
-            ..Default::default()
-        };
-
-        let cid = sandbox_guard.container_id.as_ref().unwrap();
-        let exec = state
-            .docker
-            .create_exec(cid, exec_config)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        state
-            .docker
-            .start_exec(
-                &exec.id,
-                Some(StartExecOptions {
-                    detach: true,
-                    tty: false,
-                    ..Default::default()
-                }),
-            )
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        sandbox_guard
-            .drain(0.5)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        Ok(Json(serde_json::json!({
-            "stdout": stdout,
-            "stderr": stderr,
-            "exit_code": exit_code_str.parse::<i32>().unwrap_or(-1)
-        })))
     }
 
     pub async fn stop_sandbox(
@@ -587,7 +597,7 @@ pub fn create_app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/sandboxes", post(create_sandbox).get(list_sandboxes))
         .route("/sandboxes/{id}/start", post(start_sandbox))
-        .route("/sandboxes/{id}/exec", post(exec_session_cmd))
+        .route("/sandboxes/{id}/exec", post(exec_cmd))
         .route("/sandboxes/{id}", delete(stop_sandbox))
         .with_state(state)
 }

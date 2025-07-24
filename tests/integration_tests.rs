@@ -184,7 +184,37 @@ async fn test_sandbox_endpoints_flow() {
         "Stdout should be '/tmp'"
     );
 
-    // Test 6: Make sure piping works
+    // Test 6: Test standalone mode
+    println!("Testing standalone mode...");
+    let exec_payload = json!({
+        "command": "pwd",
+        "standalone": true
+    });
+
+    let response = client
+        .post(&format!("{}/sandboxes/{}/exec", base_url, sandbox_id))
+        .json(&exec_payload)
+        .send()
+        .await
+        .expect("Failed to send exec request");
+
+    assert_eq!(response.status(), 200, "Exec command should return 200");
+
+    let exec_result: serde_json::Value = response
+        .json()
+        .await
+        .expect("Failed to parse exec response");
+    assert_eq!(
+        exec_result["exit_code"], 0,
+        "Comment should return exit code 0"
+    );
+    assert_eq!(
+        exec_result["stdout"], "/\n",
+        "Stdout should be '/\n'"
+    );
+
+
+    // Test 7: Make sure piping works
     println!("Testing piping...");
     let exec_payload = json!({
         "command": "echo \"Hello, World!!\nHow you doing?\" | grep 'Hello' > output.txt && cat output.txt"
@@ -213,7 +243,7 @@ async fn test_sandbox_endpoints_flow() {
     );
 
 
-    // Test 7: Stop sandbox
+    // Test 8: Stop sandbox
     println!("Testing stop sandbox...");
     let response = client
         .delete(&format!("{}/sandboxes/{}", base_url, sandbox_id))
@@ -224,7 +254,7 @@ async fn test_sandbox_endpoints_flow() {
     assert_eq!(response.status(), 200, "Stop sandbox should return 200");
     println!("Stopped sandbox successfully");
 
-    // Test 8: Try to start already stopped sandbox (should fail)
+    // Test 9: Try to start already stopped sandbox (should fail)
     println!("Testing start non-existent sandbox...");
     let response = client
         .post(&format!("{}/sandboxes/{}/start", base_url, sandbox_id))
