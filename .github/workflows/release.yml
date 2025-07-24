@@ -82,7 +82,6 @@ jobs:
         with:
           files: |
             artifacts/*/*
-            install.sh
           fail_on_unmatched_files: true
           body: |
             New release of sos
