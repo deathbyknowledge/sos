@@ -3,7 +3,7 @@
 set -e
 
 # Get the latest version from GitHub
-LATEST_VERSION=$(curl -s "https://api.github.com/repos/ykt/sos/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+LATEST_VERSION=$(curl -s "https://api.github.com/repos/deathbyknowledge/sos/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 
 if [ -z "$LATEST_VERSION" ]; then
     echo "Could not fetch the latest version."
@@ -36,7 +36,7 @@ case "$OS" in
 esac
 
 # Construct the download URL
-DOWNLOAD_URL="https://github.com/ykt/sos/releases/download/${LATEST_VERSION}/sos-${TARGET}.tar.gz"
+DOWNLOAD_URL="https://github.com/deathbyknowledge/sos/releases/download/${LATEST_VERSION}/sos-${TARGET}.tar.gz"
 
 # Download and extract the binary
 echo "Downloading sos for ${TARGET}..."
