@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::Result;
 use bollard::Docker;
 use clap::{Parser, Subcommand};
-use sos::{AppState, CreatePayload, ExecPayload};
+use sos::http::{AppState, CreatePayload, ExecPayload};
 use tokio::sync::{Mutex, Semaphore};
 
 #[derive(Parser)]
@@ -170,7 +170,7 @@ async fn serve_command(port: u16, max_sandboxes: usize, timeout: u64) -> Result<
         }
     });
 
-    let app = sos::create_app(state);
+    let app = sos::http::create_app(state);
 
     let bind_addr = format!("0.0.0.0:{}", port);
     println!("Server listening on {}", bind_addr);
