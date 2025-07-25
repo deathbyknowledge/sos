@@ -63,6 +63,7 @@ pub struct Sandbox {
     pub permit: Option<tokio::sync::OwnedSemaphorePermit>,
     pub input: Option<Mutex<Pin<Box<dyn tokio::io::AsyncWrite + Send>>>>,
     pub output_receiver: Option<Mutex<UnboundedReceiver<Bytes>>>,
+    pub start_time: Option<Instant>,
 }
 
 impl Sandbox {
@@ -273,6 +274,7 @@ mod handlers {
             permit: None,
             input: None,
             output_receiver: None,
+            start_time: None,
         };
         state
             .sandboxes
@@ -478,6 +480,7 @@ mod handlers {
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+        sandbox_guard.start_time = Some(Instant::now());
         sandbox_guard.permit = Some(permit);
 
         Ok(())
