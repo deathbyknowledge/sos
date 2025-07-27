@@ -44,6 +44,24 @@ pub struct SandboxInfo {
     pub status: String,
 }
 
+impl SandboxError {
+    fn to_status_code(&self) -> StatusCode {
+        match self {
+            SandboxError::NotStarted => StatusCode::BAD_REQUEST,
+            SandboxError::AlreadyStarted => StatusCode::BAD_REQUEST,
+            SandboxError::SetupCommandsFailed(_) => StatusCode::BAD_REQUEST,
+            SandboxError::PullImageFailed(_) => StatusCode::BAD_REQUEST,
+            SandboxError::StopContainerFailed(_) => StatusCode::BAD_REQUEST,
+            SandboxError::StartContainerFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SandboxError::ContainerWriteFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SandboxError::ContainerReadFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SandboxError::ExecFailed(_, _) => StatusCode::INTERNAL_SERVER_ERROR,
+            SandboxError::CreateExecFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SandboxError::TimeoutWaitingForMarker(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
 pub async fn create_sandbox(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreatePayload>,
@@ -87,11 +105,10 @@ pub async fn start_sandbox(
     // Now lock the individual sandbox and do long work
     let mut sandbox_guard = sandbox_arc.lock().await;
 
-    // TODO: accurate errors
     sandbox_guard
         .start(permit)
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        .map_err(|e| (e.to_status_code(), e.to_string()))?;
 
     Ok(())
 }
@@ -123,11 +140,11 @@ pub async fn exec_cmd(
         true => sandbox_guard
             .exec_standalone_cmd(vec![command])
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+            .map_err(|e| (e.to_status_code(), e.to_string()))?,
         false => sandbox_guard
             .exec_session_cmd(command)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+            .map_err(|e| (e.to_status_code(), e.to_string()))?,
     };
 
     Ok(Json(serde_json::json!({
@@ -148,12 +165,12 @@ pub async fn stop_sandbox(
             .ok_or((StatusCode::NOT_FOUND, format!("Sandbox {} not found", id)))?
     };
 
-    sandbox_arc.lock().await.stop().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to stop sandbox {}: {}", id, e),
-        )
-    })?;
+    sandbox_arc
+        .lock()
+        .await
+        .stop()
+        .await
+        .map_err(|e| (e.to_status_code(), e.to_string()))?;
 
     // Sandbox_arc drops here, releasing permit if held
     Ok(())
@@ -173,11 +190,7 @@ pub async fn list_sandboxes(
         .iter()
         .map(|sandbox_arc| async {
             let sandbox = sandbox_arc.lock().await;
-            let status = if sandbox.container_id.is_some() {
-                "started"
-            } else {
-                "created"
-            };
+            let status = sandbox.status();
             SandboxInfo {
                 id: sandbox.id.clone(),
                 image: sandbox.image.clone(),

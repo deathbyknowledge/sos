@@ -7,6 +7,7 @@ use anyhow::Result;
 use bollard::Docker;
 use clap::{Parser, Subcommand};
 use sos::http::{AppState, CreatePayload, ExecPayload};
+use sos::sandbox::SandboxStatus;
 use tokio::sync::{Mutex, Semaphore};
 
 #[derive(Parser)]
@@ -152,18 +153,9 @@ async fn serve_command(port: u16, max_sandboxes: usize, timeout: u64) -> Result<
                 };
 
                 if let Some(sandbox_arc) = sandbox_arc {
-                    let cid_opt = sandbox_arc.lock().await.container_id.clone();
-                    if let Some(cid) = cid_opt {
-                        let _ = state_clone
-                            .docker
-                            .remove_container(
-                                &cid,
-                                Some(bollard::query_parameters::RemoveContainerOptions {
-                                    force: true,
-                                    ..Default::default()
-                                }),
-                            )
-                            .await;
+                    let mut sandbox = sandbox_arc.lock().await;
+                    if let SandboxStatus::Started = sandbox.status() {
+                        let _ = sandbox.stop().await;
                     }
                 }
             }

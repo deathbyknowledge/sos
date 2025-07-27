@@ -1,26 +1,70 @@
 use std::{pin::Pin, sync::Arc};
 
-use anyhow::{Result, anyhow};
 use bollard::{
-    exec::{CreateExecOptions, StartExecOptions, StartExecResults}, query_parameters::RemoveContainerOptions, Docker
+    Docker,
+    exec::{CreateExecOptions, StartExecOptions, StartExecResults},
+    query_parameters::RemoveContainerOptions,
 };
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use std::sync::atomic::{AtomicU32, Ordering};
+use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio::time::{self, Duration, Instant};
 use tokio::{io::AsyncWriteExt, sync::OwnedSemaphorePermit};
+
+type Result<T> = std::result::Result<T, SandboxError>;
+
+#[derive(Error, Debug)]
+pub enum SandboxError {
+    #[error("Sandbox not started")]
+    NotStarted,
+    #[error("Sandbox already started")]
+    AlreadyStarted,
+    #[error("Setup commands failed: {0}")]
+    SetupCommandsFailed(String),
+    #[error("Failed to pull image: {0}")]
+    PullImageFailed(String),
+    #[error("Failed to stop container: {0}")]
+    StopContainerFailed(String),
+    #[error("Failed to start container {0}")]
+    StartContainerFailed(String),
+    #[error("Container write failed: {0}")]
+    ContainerWriteFailed(String),
+    #[error("Container read failed: {0}")]
+    ContainerReadFailed(String),
+    #[error("Exec failed: {0} (exit code: {1})")]
+    ExecFailed(String, i64),
+    #[error("Failed to create exec: {0}")]
+    CreateExecFailed(String),
+    #[error("Timeout waiting for marker: {0}")]
+    TimeoutWaitingForMarker(String),
+}
+
+pub enum SandboxStatus {
+    Created,
+    Started,
+}
+
+impl std::fmt::Display for SandboxStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SandboxStatus::Created => write!(f, "created"),
+            SandboxStatus::Started => write!(f, "started"),
+        }
+    }
+}
 
 pub struct Sandbox {
     pub id: String,
     pub image: String,
     pub setup_commands: String,
-    pub container_id: Option<String>,
-    pub permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    pub input: Option<Mutex<Pin<Box<dyn tokio::io::AsyncWrite + Send>>>>,
-    pub output_receiver: Option<Mutex<UnboundedReceiver<Bytes>>>,
     pub start_time: Option<Instant>,
+    container_id: Option<String>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    input: Option<Mutex<Pin<Box<dyn tokio::io::AsyncWrite + Send>>>>,
+    output_receiver: Option<Mutex<UnboundedReceiver<Bytes>>>,
     command_id: AtomicU32,
     docker: Arc<Docker>,
 }
@@ -41,6 +85,14 @@ impl Sandbox {
         }
     }
 
+    pub fn status(&self) -> SandboxStatus {
+        if self.container_id.is_some() {
+            SandboxStatus::Started
+        } else {
+            SandboxStatus::Created
+        }
+    }
+
     pub async fn stop(&mut self) -> Result<()> {
         let cid_opt = self.container_id.clone();
 
@@ -54,9 +106,9 @@ impl Sandbox {
                         ..Default::default()
                     }),
                 )
-                .await?;
+                .await;
         } else {
-            return Err(anyhow!("Sandbox not started"));
+            return Err(SandboxError::NotStarted);
         }
 
         // Sandbox_arc drops here, releasing permit if held
@@ -65,7 +117,7 @@ impl Sandbox {
 
     pub async fn start(&mut self, permit: OwnedSemaphorePermit) -> Result<()> {
         if self.container_id.is_some() {
-            return Err(anyhow!("Sandbox already started"));
+            return Err(SandboxError::AlreadyStarted);
         }
         // Check if image exists locally, pull if it doesn't
         use bollard::query_parameters::CreateImageOptions;
@@ -84,7 +136,11 @@ impl Sandbox {
                 });
 
                 let mut pull_stream = self.docker.create_image(pull_options, None, None);
-                while let Some(_) = pull_stream.try_next().await? {
+                while let Some(_) = pull_stream
+                    .try_next()
+                    .await
+                    .map_err(|e| SandboxError::PullImageFailed(e.to_string()))?
+                {
                     // TODO: print progress
                 }
             }
@@ -107,7 +163,7 @@ impl Sandbox {
                 None::<bollard::query_parameters::CreateContainerOptions>,
                 config,
             )
-            .await?;
+            .await.map_err(|e| SandboxError::StartContainerFailed(e.to_string()))?;
 
         self.container_id = Some(create_response.id.clone());
 
@@ -116,12 +172,19 @@ impl Sandbox {
                 &create_response.id,
                 None::<bollard::query_parameters::StartContainerOptions>,
             )
-            .await?;
+            .await.map_err(|e| SandboxError::StartContainerFailed(e.to_string()))?;
 
         if !self.setup_commands.is_empty() {
-            let (_, _, exit_code) = self.exec_standalone_cmd(self.setup_commands.split_whitespace().map(|s| s.to_string()).collect()).await?;
+            let (_, stderr, exit_code) = self
+                .exec_standalone_cmd(
+                    self.setup_commands
+                        .split_whitespace()
+                        .map(|s| s.to_string())
+                        .collect(),
+                )
+                .await?;
             if exit_code != 0 {
-                return Err(anyhow!("Setup commands failed"));
+                return Err(SandboxError::SetupCommandsFailed(stderr));
             }
         }
 
@@ -137,7 +200,7 @@ impl Sandbox {
         let attach_res = self
             .docker
             .attach_container(&create_response.id, Some(attach_options))
-            .await?;
+            .await.map_err(|e| SandboxError::StartContainerFailed(e.to_string()))?;
 
         let mut output_stream = attach_res.output;
         let input = attach_res.input;
@@ -167,7 +230,7 @@ impl Sandbox {
             let mut input_guard = self.input.as_ref().unwrap().lock().await;
             input_guard
                 .write_all("stty -echo; set +H\n".as_bytes())
-                .await?;
+                .await.map_err(|e| SandboxError::ContainerWriteFailed(e.to_string()))?;
         }
 
         self.drain(0.5).await?;
@@ -180,7 +243,7 @@ impl Sandbox {
     pub async fn exec_session_cmd(
         &mut self,
         cmd: String,
-    ) -> Result<(String, String, i64), anyhow::Error> {
+    ) -> Result<(String, String, i64)> {
         let command_id = self.command_id.fetch_add(1, Ordering::Relaxed);
         let stdout_file = format!("/tmp/stdout_{}.txt", command_id);
         let stderr_file = format!("/tmp/stderr_{}.txt", command_id);
@@ -197,10 +260,10 @@ impl Sandbox {
             let mut input = self
                 .input
                 .as_ref()
-                .ok_or(anyhow!("Sandbox not started"))?
+                .ok_or(SandboxError::NotStarted)?
                 .lock()
                 .await;
-            input.write_all(cmd_to_send.as_bytes()).await?;
+            input.write_all(cmd_to_send.as_bytes()).await.map_err(|e| SandboxError::ContainerWriteFailed(e.to_string()))?;
         }
 
         self.read_until_marker(&marker, 20.0).await?;
@@ -218,7 +281,7 @@ impl Sandbox {
         let (combined_output, _, exec_exit_code) = self.exec_standalone_cmd(combined_cmd).await?;
 
         if exec_exit_code != 0 {
-            return Err(anyhow!("Failed to read output files"));
+            return Err(SandboxError::ExecFailed(combined_output, exec_exit_code));
         }
 
         // Parse the combined output
@@ -251,7 +314,7 @@ impl Sandbox {
         };
 
         let cid = self.container_id.as_ref().unwrap();
-        let exec = self.docker.create_exec(cid, exec_config).await?;
+        let exec = self.docker.create_exec(cid, exec_config).await.map_err(|e| SandboxError::CreateExecFailed(e.to_string()))?;
 
         self.docker
             .start_exec(
@@ -262,7 +325,7 @@ impl Sandbox {
                     ..Default::default()
                 }),
             )
-            .await?;
+            .await.map_err(|e| SandboxError::CreateExecFailed(e.to_string()))?;
 
         self.drain(0.5).await?;
 
@@ -270,7 +333,7 @@ impl Sandbox {
     }
 
     pub async fn exec_standalone_cmd(&self, cmd: Vec<String>) -> Result<(String, String, i64)> {
-        let cid = self.container_id.as_ref().ok_or(anyhow!("No container"))?;
+        let cid = self.container_id.as_ref().ok_or(SandboxError::NotStarted)?;
         let exec_config = CreateExecOptions {
             cmd: Some(cmd),
             attach_stdout: Some(true),
@@ -279,23 +342,23 @@ impl Sandbox {
             tty: Some(false),
             ..Default::default()
         };
-        let exec = self.docker.create_exec(cid, exec_config).await?;
+        let exec = self.docker.create_exec(cid, exec_config).await.map_err(|e| SandboxError::CreateExecFailed(e.to_string()))?;
         let start_res = self
             .docker
             .start_exec(&exec.id, None::<StartExecOptions>)
-            .await?;
+            .await.map_err(|e| SandboxError::CreateExecFailed(e.to_string()))?;
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         if let StartExecResults::Attached { output, .. } = start_res {
             let mut output = output;
             while let Some(item) = output.next().await {
-                match item? {
+                match item.map_err(|e| SandboxError::ContainerReadFailed(e.to_string()))? {
                     bollard::container::LogOutput::StdOut { message } => stdout.extend(&message),
                     bollard::container::LogOutput::StdErr { message } => stderr.extend(&message),
                     _ => {}
                 }
             }
         }
-        let inspect = self.docker.inspect_exec(&exec.id).await?;
+        let inspect = self.docker.inspect_exec(&exec.id).await.map_err(|e| SandboxError::ContainerReadFailed(e.to_string()))?;
         let exit_code = inspect.exit_code.unwrap_or(-1);
         let stdout_str = String::from_utf8_lossy(&stdout).to_string();
         let stderr_str = String::from_utf8_lossy(&stderr).to_string();
@@ -306,7 +369,7 @@ impl Sandbox {
         let receiver = self
             .output_receiver
             .as_ref()
-            .ok_or(anyhow!("No receiver"))?;
+            .ok_or(SandboxError::NotStarted)?;
         let mut receiver = receiver.lock().await;
         let mut drained: Vec<u8> = Vec::new();
         loop {
@@ -323,20 +386,20 @@ impl Sandbox {
         let receiver = self
             .output_receiver
             .as_ref()
-            .ok_or(anyhow!("No receiver"))?;
+            .ok_or(SandboxError::NotStarted)?;
         let mut receiver = receiver.lock().await;
         let mut accumulated = String::new();
         let start = Instant::now();
         while !accumulated.contains(marker) {
             let elapsed = start.elapsed().as_secs_f64();
             if elapsed > timeout {
-                return Err(anyhow!("Timeout waiting for marker: {}", marker));
+                return Err(SandboxError::TimeoutWaitingForMarker(marker.to_string()));
             }
             let remaining = timeout - elapsed;
             match time::timeout(Duration::from_secs_f64(remaining), receiver.next()).await {
                 Ok(Some(chunk)) => accumulated += &String::from_utf8_lossy(&chunk),
-                Ok(None) => return Err(anyhow!("Stream closed unexpectedly")),
-                Err(_) => return Err(anyhow!("Timeout waiting for marker: {}", marker)),
+                Ok(None) => return Err(SandboxError::ContainerReadFailed("Stream closed unexpectedly".to_string())),
+                Err(_) => return Err(SandboxError::TimeoutWaitingForMarker(marker.to_string())),
             }
         }
         Ok(())
