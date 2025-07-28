@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bollard::Docker;
-use sos::http::{AppState, create_app};
-use serde_json::json;
-use tokio::sync::{Mutex, Semaphore};
-use tokio::time::{Duration, sleep, Instant};
 use futures::future;
+use serde_json::json;
+use sos::http::{AppState, create_app};
+use tokio::sync::{Mutex, Semaphore};
+use tokio::time::{Duration, Instant, sleep};
 
 async fn start_test_server() -> String {
     let semaphore = Arc::new(Semaphore::new(10));
@@ -108,10 +108,7 @@ async fn test_sandbox_endpoints_flow() {
         exec_result["stderr"], "cd: not-exists: No such file or directory",
         "Stderr should not be empty"
     );
-    assert_eq!(
-        exec_result["exit_code"], 1,
-        "Exit code should be 1"
-    );
+    assert_eq!(exec_result["exit_code"], 1, "Exit code should be 1");
     println!("Executed command successfully: {:?}", exec_result);
 
     // Test 4: Execute comment (should be ignored)
@@ -142,7 +139,7 @@ async fn test_sandbox_endpoints_flow() {
         "Comment should return empty stdout"
     );
     println!("Comment command handled correctly");
-    
+
     // Test 5: Make sure session is persisted
     println!("Testing session persistence...");
     let exec_payload = json!({
@@ -179,10 +176,7 @@ async fn test_sandbox_endpoints_flow() {
         exec_result["exit_code"], 0,
         "Comment should return exit code 0"
     );
-    assert_eq!(
-        exec_result["stdout"], "/tmp",
-        "Stdout should be '/tmp'"
-    );
+    assert_eq!(exec_result["stdout"], "/tmp", "Stdout should be '/tmp'");
 
     // Test 6: Test standalone mode
     println!("Testing standalone mode...");
@@ -208,11 +202,7 @@ async fn test_sandbox_endpoints_flow() {
         exec_result["exit_code"], 0,
         "Comment should return exit code 0"
     );
-    assert_eq!(
-        exec_result["stdout"], "/\n",
-        "Stdout should be '/\n'"
-    );
-
+    assert_eq!(exec_result["stdout"], "/\n", "Stdout should be '/\n'");
 
     // Test 7: Make sure piping works
     println!("Testing piping...");
@@ -242,11 +232,11 @@ async fn test_sandbox_endpoints_flow() {
         "Piping should return exit code 0"
     );
 
-
     // Test 8: Stop sandbox
     println!("Testing stop sandbox...");
     let response = client
-        .delete(&format!("{}/sandboxes/{}", base_url, sandbox_id))
+        .post(&format!("{}/sandboxes/{}/stop", base_url, sandbox_id))
+        .json(&json!({ "remove": true }))
         .send()
         .await
         .expect("Failed to send stop request");
@@ -314,7 +304,8 @@ async fn test_error_conditions() {
     // Test 3: Stop non-existent sandbox
     println!("Testing stop non-existent sandbox...");
     let response = client
-        .delete(&format!("{}/sandboxes/{}", base_url, fake_id))
+        .post(&format!("{}/sandboxes/{}/stop", base_url, fake_id))
+        .json(&json!({ "remove": true }))
         .send()
         .await
         .expect("Failed to send stop request");
@@ -376,7 +367,8 @@ async fn test_double_start_sandbox() {
 
     // Clean up
     client
-        .delete(&format!("{}/sandboxes/{}", base_url, sandbox_id))
+        .post(&format!("{}/sandboxes/{}/stop", base_url, sandbox_id))
+        .json(&json!({ "remove": true }))
         .send()
         .await
         .expect("Failed to clean up sandbox");
@@ -388,7 +380,7 @@ async fn test_double_start_sandbox() {
 #[ignore]
 async fn test_semaphore_fuzz() {
     println!("Testing semaphore with 8 concurrent sandboxes and limit of 3...");
-    
+
     // Create test server with semaphore limit of 3 (smaller for faster testing)
     let semaphore = Arc::new(Semaphore::new(3));
     let state = Arc::new(AppState {
@@ -416,7 +408,7 @@ async fn test_semaphore_fuzz() {
     sleep(Duration::from_millis(100)).await;
 
     let client = reqwest::Client::new();
-    
+
     // Create 8 sandboxes (reduced for faster testing)
     println!("Creating 8 sandboxes...");
     let mut sandbox_ids = Vec::new();
@@ -434,7 +426,7 @@ async fn test_semaphore_fuzz() {
             .expect("Failed to create sandbox");
 
         assert_eq!(response.status(), 200);
-        
+
         let create_result: serde_json::Value = response
             .json()
             .await
@@ -447,7 +439,7 @@ async fn test_semaphore_fuzz() {
     // Run complete trajectories (start → exec → cleanup) concurrently
     println!("Running 8 complete sandbox trajectories concurrently (semaphore limit: 3)...");
     let start_time = Instant::now();
-    
+
     let trajectory_tasks: Vec<_> = sandbox_ids
         .iter()
         .enumerate()
@@ -457,22 +449,26 @@ async fn test_semaphore_fuzz() {
             let sandbox_id = sandbox_id.clone();
             tokio::spawn(async move {
                 let task_start = Instant::now();
-                
+
                 // Start sandbox
                 let start_response = client
                     .post(&format!("{}/sandboxes/{}/start", base_url, sandbox_id))
                     .send()
                     .await
                     .expect("Failed to send start request");
-                
+
                 if start_response.status() != 200 {
-                    println!("Sandbox {} start failed with status: {}", i, start_response.status());
+                    println!(
+                        "Sandbox {} start failed with status: {}",
+                        i,
+                        start_response.status()
+                    );
                     return (i, false, task_start.elapsed());
                 }
-                
+
                 let start_duration = task_start.elapsed();
                 println!("Sandbox {} started in {:?}", i, start_duration);
-                
+
                 // Execute command
                 let exec_payload = json!({
                     "command": format!("echo 'Hello from sandbox {}'", i)
@@ -484,82 +480,97 @@ async fn test_semaphore_fuzz() {
                     .send()
                     .await
                     .expect("Failed to send exec request");
-                
+
                 if exec_response.status() != 200 {
-                    println!("Sandbox {} exec failed with status: {}", i, exec_response.status());
+                    println!(
+                        "Sandbox {} exec failed with status: {}",
+                        i,
+                        exec_response.status()
+                    );
                 } else {
                     println!("Sandbox {} executed command successfully", i);
                 }
-                
+
                 // Clean up
                 let cleanup_response = client
-                    .delete(&format!("{}/sandboxes/{}", base_url, sandbox_id))
+                    .post(&format!("{}/sandboxes/{}/stop", base_url, sandbox_id))
+                    .json(&json!({ "remove": true }))
                     .send()
                     .await
                     .expect("Failed to send cleanup request");
-                
+
                 let total_duration = task_start.elapsed();
-                println!("Sandbox {} complete trajectory finished in {:?}", i, total_duration);
-                
-                let success = start_response.status() == 200 && 
-                             exec_response.status() == 200 && 
-                             cleanup_response.status() == 200;
-                
+                println!(
+                    "Sandbox {} complete trajectory finished in {:?}",
+                    i, total_duration
+                );
+
+                let success = start_response.status() == 200
+                    && exec_response.status() == 200
+                    && cleanup_response.status() == 200;
+
                 (i, success, total_duration)
             })
         })
         .collect();
 
     // Wait for all trajectories to complete
-    let mut results = future::join_all(trajectory_tasks).await
+    let mut results = future::join_all(trajectory_tasks)
+        .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .expect("Some tasks failed");
-    
+
     let total_duration = start_time.elapsed();
     println!("All trajectories completed in {:?}", total_duration);
 
     // Verify all trajectories succeeded
     let successful_trajectories = results.iter().filter(|(_, success, _)| *success).count();
-    assert_eq!(successful_trajectories, 8, "All 8 trajectories should succeed");
+    assert_eq!(
+        successful_trajectories, 8,
+        "All 8 trajectories should succeed"
+    );
 
     // Analyze timing to ensure semaphore is working
     results.sort_by_key(|(_, _, duration)| *duration);
     println!("Trajectory durations (sorted):");
     for (i, (sandbox_idx, success, duration)) in results.iter().enumerate() {
-        println!("  #{}: Sandbox {} - {} - {:?}", 
-                 i + 1, sandbox_idx, 
-                 if *success { "SUCCESS" } else { "FAILED" }, 
-                 duration);
+        println!(
+            "  #{}: Sandbox {} - {} - {:?}",
+            i + 1,
+            sandbox_idx,
+            if *success { "SUCCESS" } else { "FAILED" },
+            duration
+        );
     }
 
     // Analyze the timing patterns to detect semaphore behavior
     let durations: Vec<u128> = results.iter().map(|(_, _, d)| d.as_millis()).collect();
-    
+
     println!("Timing analysis:");
     println!("  First batch (1-3): {:?}ms", &durations[0..3]);
     println!("  Second batch (4-6): {:?}ms", &durations[3..6]);
     println!("  Third batch (7-8): {:?}ms", &durations[6..8]);
-    
+
     // With proper semaphore behavior, we should see clear timing differences
     // The first 3 should complete first, then the next batch should start
     let first_3_max = durations[2];
     let next_3_min = durations[3];
-    
+
     if durations.len() >= 6 && next_3_min > first_3_max {
         println!("✓ Clear semaphore batching detected - batch separation visible");
     } else {
         println!("⚠ Batching not clearly visible, but semaphore may still be working");
     }
-    
+
     // Count how many completed quickly vs slowly
     let fast_trajectories = durations.iter().filter(|&&d| d < 5000).count(); // < 5 seconds
     let slow_trajectories = durations.iter().filter(|&&d| d >= 5000).count(); // >= 5 seconds
-    
+
     println!("Speed distribution:");
     println!("  Fast trajectories (< 5s): {}", fast_trajectories);
     println!("  Slow trajectories (>= 5s): {}", slow_trajectories);
-    
+
     println!("✓ All trajectories completed successfully!");
     println!("✓ Semaphore correctly limited concurrent sandbox starts to 3");
 

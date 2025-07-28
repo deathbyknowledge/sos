@@ -6,13 +6,13 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    routing::{delete, post},
+    routing::post,
 };
 use bollard::Docker;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::{sync::{Mutex, Semaphore}, time::Instant};
 use uuid::Uuid;
 
 use crate::sandbox::*;
@@ -138,7 +138,7 @@ pub async fn exec_cmd(
 
     let (stdout, stderr, exit_code) = match standalone {
         true => sandbox_guard
-            .exec_standalone_cmd(vec![command])
+            .exec_standalone_cmd(command)
             .await
             .map_err(|e| (e.to_status_code(), e.to_string()))?,
         false => sandbox_guard
@@ -154,17 +154,32 @@ pub async fn exec_cmd(
     })))
 }
 
+#[derive(Deserialize, serde::Serialize)]
+pub struct StopPayload {
+    pub remove: Option<bool>,
+}
+
 pub async fn stop_sandbox(
     Path(id): Path<String>,
     State(state): State<Arc<AppState>>,
+    Json(payload): Json<StopPayload>,
 ) -> Result<(), (StatusCode, String)> {
     let sandbox_arc = {
+        let remove = payload.remove.unwrap_or(false);
         let mut sandboxes = state.sandboxes.lock().await;
-        sandboxes
-            .remove(&id)
-            .ok_or((StatusCode::NOT_FOUND, format!("Sandbox {} not found", id)))?
+        if remove {
+            sandboxes
+                .remove(&id)
+                .ok_or((StatusCode::NOT_FOUND, format!("Sandbox {} not found", id)))?
+        } else {
+            sandboxes
+                .get(&id)
+                .cloned()
+                .ok_or((StatusCode::NOT_FOUND, format!("Sandbox {} not found", id)))?
+        }
     };
 
+    // Permit is released here
     sandbox_arc
         .lock()
         .await
@@ -172,8 +187,69 @@ pub async fn stop_sandbox(
         .await
         .map_err(|e| (e.to_status_code(), e.to_string()))?;
 
-    // Sandbox_arc drops here, releasing permit if held
     Ok(())
+}
+
+pub async fn get_trajectory(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let sandbox_arc = {
+        let sandboxes = state.sandboxes.lock().await;
+        sandboxes
+            .get(&id)
+            .cloned()
+            .ok_or((StatusCode::NOT_FOUND, format!("Sandbox {} not found", id)))?
+    };
+
+    let sandbox = sandbox_arc.lock().await;
+    let trajectory = sandbox.get_trajectory();
+
+    let start_time = sandbox.start_time.unwrap_or(Instant::now());
+    let trajectory_json: Vec<Value> = trajectory
+        .iter()
+        .enumerate()
+        .map(|(i, cmd)| {
+            let timestamp = (cmd.timestamp - start_time).as_secs_f64();
+            let mut cmd_json = serde_json::json!({
+                "index": i,
+                "command": cmd.command,
+                "timestamp": timestamp,
+            });
+
+            if let Some(result) = &cmd.result {
+                cmd_json["result"] = serde_json::json!({
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "exit_code": result.exit_code,
+                });
+            }
+
+            cmd_json
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "sandbox_id": id,
+        "command_count": sandbox.command_count(),
+        "trajectory": trajectory_json
+    })))
+}
+
+pub async fn get_trajectory_formatted(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<String, (StatusCode, String)> {
+    let sandbox_arc = {
+        let sandboxes = state.sandboxes.lock().await;
+        sandboxes
+            .get(&id)
+            .cloned()
+            .ok_or((StatusCode::NOT_FOUND, format!("Sandbox {} not found", id)))?
+    };
+
+    let sandbox = sandbox_arc.lock().await;
+    Ok(sandbox.format_trajectory())
 }
 
 pub async fn list_sandboxes(
@@ -190,7 +266,7 @@ pub async fn list_sandboxes(
         .iter()
         .map(|sandbox_arc| async {
             let sandbox = sandbox_arc.lock().await;
-            let status = sandbox.status();
+            let status = sandbox.get_status();
             SandboxInfo {
                 id: sandbox.id.clone(),
                 image: sandbox.image.clone(),
@@ -209,6 +285,14 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .route("/sandboxes", post(create_sandbox).get(list_sandboxes))
         .route("/sandboxes/{id}/start", post(start_sandbox))
         .route("/sandboxes/{id}/exec", post(exec_cmd))
-        .route("/sandboxes/{id}", delete(stop_sandbox))
+        .route(
+            "/sandboxes/{id}/trajectory",
+            axum::routing::get(get_trajectory),
+        )
+        .route(
+            "/sandboxes/{id}/trajectory/formatted",
+            axum::routing::get(get_trajectory_formatted),
+        )
+        .route("/sandboxes/{id}/stop", post(stop_sandbox))
         .with_state(state)
 }

@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::Result;
 use bollard::Docker;
 use clap::{Parser, Subcommand};
-use sos::http::{AppState, CreatePayload, ExecPayload};
+use sos::http::{AppState, CreatePayload, ExecPayload, StopPayload};
 use sos::sandbox::SandboxStatus;
 use tokio::sync::{Mutex, Semaphore};
 
@@ -87,6 +87,16 @@ enum SandboxCommands {
     Stop {
         /// Sandbox ID
         id: String,
+        #[arg(short, long, default_value = "false")]
+        remove: Option<bool>,
+    },
+    /// View the command trajectory of a sandbox
+    Trajectory {
+        /// Sandbox ID
+        id: String,
+        /// Whether to format output as human-readable text
+        #[arg(short, long, default_value = "false")]
+        formatted: bool,
     },
 }
 
@@ -154,7 +164,7 @@ async fn serve_command(port: u16, max_sandboxes: usize, timeout: u64) -> Result<
 
                 if let Some(sandbox_arc) = sandbox_arc {
                     let mut sandbox = sandbox_arc.lock().await;
-                    if let SandboxStatus::Started = sandbox.status() {
+                    if let SandboxStatus::Started(_) = sandbox.get_status() {
                         let _ = sandbox.stop().await;
                     }
                 }
@@ -299,20 +309,55 @@ async fn sandbox_command(server: String, action: SandboxCommands) -> Result<()> 
                 std::process::exit(1);
             }
         }
-        SandboxCommands::Stop { id } => {
+        SandboxCommands::Stop { id, remove } => {
             println!("Stopping sandbox: {}", id);
 
             let response = client
-                .delete(&format!("{}/sandboxes/{}", server, id))
+                .post(&format!("{}/sandboxes/{}/stop", server, id))
+                .json(&StopPayload { remove })
                 .send()
                 .await?;
 
             if response.status().is_success() {
-                println!("✓ Sandbox {} stopped and removed", id);
+                println!("✓ Sandbox {} stopped", id);
+                println!("  Use 'sos trajectory {}' to view command history", id);
             } else {
                 let error = response.text().await?;
                 eprintln!("✗ Failed to stop sandbox: {}", error);
                 std::process::exit(1);
+            }
+        }
+        SandboxCommands::Trajectory { id, formatted } => {
+            println!("Viewing trajectory for sandbox: {}", id);
+
+            if formatted {
+                let response = client
+                    .get(&format!("{}/sandboxes/{}/trajectory/formatted", server, id))
+                    .send()
+                    .await?;
+
+                if response.status().is_success() {
+                    let formatted_trajectory = response.text().await?;
+                    println!("{}", formatted_trajectory);
+                } else {
+                    let error = response.text().await?;
+                    eprintln!("✗ Failed to get trajectory: {}", error);
+                    std::process::exit(1);
+                }
+            } else {
+                let response = client
+                    .get(&format!("{}/sandboxes/{}/trajectory", server, id))
+                    .send()
+                    .await?;
+
+                if response.status().is_success() {
+                    let trajectory_data: serde_json::Value = response.json().await?;
+                    println!("{}", serde_json::to_string_pretty(&trajectory_data)?);
+                } else {
+                    let error = response.text().await?;
+                    eprintln!("✗ Failed to get trajectory: {}", error);
+                    std::process::exit(1);
+                }
             }
         }
     }
@@ -424,7 +469,8 @@ async fn session_command(server: String, image: String, setup: Vec<String>) -> R
     // Clean up the sandbox
     println!("Stopping and removing sandbox...");
     let response = client
-        .delete(&format!("{}/sandboxes/{}", server, id))
+        .post(&format!("{}/sandboxes/{}/stop", server, id))
+        .json(&StopPayload { remove: Some(true) })
         .send()
         .await?;
 

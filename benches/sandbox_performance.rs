@@ -108,7 +108,8 @@ async fn benchmark_sandbox_lifecycle(
 
     // Cleanup
     client
-        .delete(&format!("{}/sandboxes/{}", base_url, sandbox_id))
+        .post(&format!("{}/sandboxes/{}/stop", base_url, sandbox_id))
+        .json(&json!({ "remove": true }))
         .send()
         .await?;
 
@@ -116,7 +117,7 @@ async fn benchmark_sandbox_lifecycle(
 }
 
 fn sandbox_throughput_benchmark(c: &mut Criterion) {
-    let grid = tokio::runtime::Runtime::new().unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
 
     let mut group = c.benchmark_group("sandbox_throughput");
     
@@ -136,7 +137,7 @@ fn sandbox_throughput_benchmark(c: &mut Criterion) {
             &(num_sandboxes, semaphore_limit),
             |b, &(num_sandboxes, semaphore_limit)| {
                 b.iter(|| {
-                    grid.block_on(async {
+                    runtime.block_on(async {
                         benchmark_sandbox_throughput(num_sandboxes, semaphore_limit)
                             .await
                             .unwrap()
@@ -150,11 +151,11 @@ fn sandbox_throughput_benchmark(c: &mut Criterion) {
 }
 
 fn sandbox_latency_benchmark(c: &mut Criterion) {
-    let grid = tokio::runtime::Runtime::new().unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
 
     c.bench_function("single_sandbox_lifecycle", |b| {
         b.iter(|| {
-            grid.block_on(async {
+            runtime.block_on(async {
                 benchmark_sandbox_throughput(1, 1).await.unwrap()
             })
         });
