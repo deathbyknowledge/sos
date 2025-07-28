@@ -47,7 +47,7 @@ async fn test_sandbox_endpoints_flow() {
     println!("Testing create sandbox...");
     let create_payload = json!({
         "image": "ubuntu:latest",
-        "setup_commands": ["echo 'Setting up'", "cd /tmp"]
+        "setup_commands": ["cd /tmp", "echo 'Setting up' > /tmp/setup.txt"]
     });
 
     let response = client
@@ -156,7 +156,7 @@ async fn test_sandbox_endpoints_flow() {
     assert_eq!(response.status(), 200, "Exec command should return 200");
 
     let exec_payload = json!({
-        "command": "echo $PWD"
+        "command": "cat setup.txt"
     });
 
     let response = client
@@ -176,7 +176,11 @@ async fn test_sandbox_endpoints_flow() {
         exec_result["exit_code"], 0,
         "Comment should return exit code 0"
     );
-    assert_eq!(exec_result["stdout"], "/tmp", "Stdout should be '/tmp'");
+    assert_eq!(
+        exec_result["stdout"],
+        "Setting up",
+        "Stdout should be 'Setting up'"
+    );
 
     // Test 6: Test standalone mode
     println!("Testing standalone mode...");
