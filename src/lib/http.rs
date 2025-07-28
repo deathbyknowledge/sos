@@ -119,11 +119,6 @@ pub async fn exec_cmd(
     Json(payload): Json<ExecPayload>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let command = payload.command;
-    if command.trim_start().starts_with('#') {
-        return Ok(Json(
-            serde_json::json!({ "stdout": "", "stderr": "", "exit_code": 0 }),
-        ));
-    }
 
     let sandbox_arc = {
         let sandboxes = state.sandboxes.lock().await;
@@ -136,7 +131,11 @@ pub async fn exec_cmd(
     let mut sandbox_guard = sandbox_arc.lock().await;
     let standalone = payload.standalone.unwrap_or(false);
 
-    let (stdout, stderr, exit_code) = match standalone {
+    let CommandResult {
+        stdout,
+        stderr,
+        exit_code,
+    } = match standalone {
         true => sandbox_guard
             .exec_standalone_cmd(command)
             .await

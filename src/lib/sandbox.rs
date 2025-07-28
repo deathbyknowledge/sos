@@ -258,7 +258,13 @@ impl Sandbox {
             .map_err(|e| SandboxError::StartContainerFailed(e.to_string()))?;
 
         if !self.setup_commands.is_empty() {
-            let (_, stderr, exit_code) = self.exec_standalone_cmd(self.setup_commands.clone()).await?;
+            let CommandResult {
+                stderr,
+                exit_code,
+                stdout: _,
+            } = self
+                .exec_standalone_cmd(self.setup_commands.clone())
+                .await?;
             if exit_code != 0 {
                 return Err(SandboxError::SetupCommandsFailed(stderr));
             }
@@ -318,7 +324,7 @@ impl Sandbox {
         Ok(())
     }
 
-    pub async fn exec_session_cmd(&mut self, cmd: String) -> Result<(String, String, i64)> {
+    pub async fn exec_session_cmd(&mut self, cmd: String) -> Result<CommandResult> {
         match self.status.clone() {
             SandboxStatus::Started(cid) => {
                 // Record the command with timestamp
@@ -328,6 +334,17 @@ impl Sandbox {
                     timestamp: execution_start,
                     result: None,
                 };
+
+                if command_execution.command.trim_start().starts_with('#') {
+                    let result = CommandResult {
+                        stdout: "".to_string(),
+                        stderr: "".to_string(),
+                        exit_code: 0,
+                    };
+                    command_execution.result = Some(result.clone());
+                    self.trajectory.push(command_execution);
+                    return Ok(result);
+                }
 
                 let command_id = self.command_id.fetch_add(1, Ordering::Relaxed);
                 let stdout_file = format!("/tmp/stdout_{}.txt", command_id);
@@ -357,14 +374,16 @@ impl Sandbox {
                 self.read_until_marker(&marker, 20.0).await?;
 
                 // Read all three files in a single exec command with delimiters
-                let combined_cmd = 
-                    format!(
-                        "echo 'STDOUT_START'; cat {}; echo 'STDOUT_END'; echo 'STDERR_START'; cat {}; echo 'STDERR_END'; echo 'EXITCODE_START'; cat {}; echo 'EXITCODE_END'",
-                        stdout_file, stderr_file, exitcode_file
-                    );
+                let combined_cmd = format!(
+                    "echo 'STDOUT_START'; cat {}; echo 'STDOUT_END'; echo 'STDERR_START'; cat {}; echo 'STDERR_END'; echo 'EXITCODE_START'; cat {}; echo 'EXITCODE_END'",
+                    stdout_file, stderr_file, exitcode_file
+                );
 
-                let (combined_output, _, exec_exit_code) =
-                    self.exec_standalone_cmd(combined_cmd).await?;
+                let CommandResult {
+                    stdout: combined_output,
+                    stderr: _,
+                    exit_code: exec_exit_code,
+                } = self.exec_standalone_cmd(combined_cmd).await?;
 
                 if exec_exit_code != 0 {
                     return Err(SandboxError::ExecFailed(combined_output, exec_exit_code));
@@ -388,11 +407,12 @@ impl Sandbox {
                 let exit_code = exit_code_str.parse::<i64>().unwrap_or(-1);
 
                 // Store the result in trajectory
-                command_execution.result = Some(CommandResult {
-                    stdout: stdout.clone(),
-                    stderr: stderr.clone(),
+                let result = CommandResult {
+                    stdout,
+                    stderr,
                     exit_code,
-                });
+                };
+                command_execution.result = Some(result.clone());
                 self.trajectory.push(command_execution);
 
                 // Clean up files
@@ -429,24 +449,21 @@ impl Sandbox {
                     .map_err(|e| SandboxError::CreateExecFailed(e.to_string()))?;
 
                 self.drain(0.5).await?;
+                
 
-                return Ok((stdout, stderr, exit_code));
+                return Ok(result);
             }
             _ => return Err(SandboxError::NotStarted),
         }
     }
 
-    pub async fn exec_standalone_cmd(&self, cmd: String) -> Result<(String, String, i64)> {
+    pub async fn exec_standalone_cmd(&self, cmd: String) -> Result<CommandResult> {
         let cid = match &self.status {
             SandboxStatus::Started(cid) => cid,
             _ => return Err(SandboxError::NotStarted),
         };
         let exec_config = CreateExecOptions {
-            cmd: Some(vec![
-                "/bin/bash".to_string(),
-                "-c".to_string(),
-                cmd,
-            ]),
+            cmd: Some(vec!["/bin/bash".to_string(), "-c".to_string(), cmd]),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             attach_stdin: Some(false),
@@ -482,7 +499,11 @@ impl Sandbox {
         let exit_code = inspect.exit_code.unwrap_or(-1);
         let stdout_str = String::from_utf8_lossy(&stdout).to_string();
         let stderr_str = String::from_utf8_lossy(&stderr).to_string();
-        Ok((stdout_str, stderr_str, exit_code))
+        Ok(CommandResult {
+            stdout: stdout_str,
+            stderr: stderr_str,
+            exit_code,
+        })
     }
 
     pub async fn drain(&mut self, timeout: f64) -> Result<String> {
