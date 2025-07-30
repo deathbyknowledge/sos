@@ -53,9 +53,7 @@ impl std::fmt::Display for SandboxStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SandboxStatus::Created => write!(f, "created"),
-            SandboxStatus::Started(container_id) => {
-                write!(f, "started (container id: {})", container_id)
-            }
+            SandboxStatus::Started(_) => write!(f, "started"),
             SandboxStatus::Stopped(_) => write!(f, "stopped"),
         }
     }
@@ -88,6 +86,13 @@ pub struct Sandbox {
     docker: Arc<Docker>,
     trajectory: Vec<CommandExecution>,
 }
+
+macro_rules! cmd {
+    ($cmd:expr) => {
+        format!("'{}'", $cmd.replace("'", "'\\''"))
+    };
+}
+
 
 impl Sandbox {
     pub fn new(id: String, image: String, setup_commands: String, docker: Arc<Docker>) -> Self {
@@ -352,7 +357,7 @@ impl Sandbox {
                 let exitcode_file = format!("/tmp/exitcode_{}.txt", command_id);
                 let marker = format!("COMMAND_DONE_{}", command_id);
 
-                let grouped_command = format!("{{ {} ; }}", cmd);
+                let grouped_command = format!("{{ eval {} ; }}", cmd!(cmd));
                 let cmd_to_send = format!(
                     "{} > {} 2> {}; echo $? > {}; echo '{}'\n",
                     grouped_command, stdout_file, stderr_file, exitcode_file, marker
@@ -368,7 +373,10 @@ impl Sandbox {
                     input
                         .write_all(cmd_to_send.as_bytes())
                         .await
-                        .map_err(|e| SandboxError::ContainerWriteFailed(e.to_string()))?;
+                        .map_err(|e| {
+                            println!("Error writing to container: {}", e);
+                            SandboxError::ContainerWriteFailed(e.to_string())
+                        })?;
                 }
 
                 self.read_until_marker(&marker, 20.0).await?;
@@ -381,11 +389,12 @@ impl Sandbox {
 
                 let CommandResult {
                     stdout: combined_output,
-                    stderr: _,
+                    stderr: combined_stderr,
                     exit_code: exec_exit_code,
                 } = self.exec_standalone_cmd(combined_cmd).await?;
 
                 if exec_exit_code != 0 {
+                    println!("Exec failed when reading combined outputs: {}, {}", combined_output, combined_stderr);
                     return Err(SandboxError::ExecFailed(combined_output, exec_exit_code));
                 }
 
@@ -463,7 +472,7 @@ impl Sandbox {
             _ => return Err(SandboxError::NotStarted),
         };
         let exec_config = CreateExecOptions {
-            cmd: Some(vec!["/bin/bash".to_string(), "-c".to_string(), cmd]),
+            cmd: Some(vec!["/bin/bash".to_string(), "-c".to_string(), cmd.clone()]),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             attach_stdin: Some(false),
@@ -496,7 +505,7 @@ impl Sandbox {
             .inspect_exec(&exec.id)
             .await
             .map_err(|e| SandboxError::ContainerReadFailed(e.to_string()))?;
-        let exit_code = inspect.exit_code.unwrap_or(-1);
+        let exit_code = inspect.exit_code.expect("Exit code not present in inspect exec");
         let stdout_str = String::from_utf8_lossy(&stdout).to_string();
         let stderr_str = String::from_utf8_lossy(&stderr).to_string();
         Ok(CommandResult {

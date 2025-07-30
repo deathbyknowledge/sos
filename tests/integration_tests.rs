@@ -4,13 +4,13 @@ use std::sync::Arc;
 use bollard::Docker;
 use futures::future;
 use serde_json::json;
-use sos::http::{AppState, create_app};
+use sos::http::{SoSState, create_app};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{Duration, Instant, sleep};
 
 async fn start_test_server() -> String {
     let semaphore = Arc::new(Semaphore::new(10));
-    let state = Arc::new(AppState {
+    let state = Arc::new(SoSState {
         docker: Arc::new(
             Docker::connect_with_local_defaults().expect("Failed to connect to docker"),
         ),
@@ -387,7 +387,7 @@ async fn test_semaphore_fuzz() {
 
     // Create test server with semaphore limit of 3 (smaller for faster testing)
     let semaphore = Arc::new(Semaphore::new(3));
-    let state = Arc::new(AppState {
+    let state = Arc::new(SoSState {
         docker: Arc::new(
             Docker::connect_with_local_defaults().expect("Failed to connect to docker"),
         ),

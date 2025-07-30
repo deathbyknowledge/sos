@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::Result;
 use bollard::Docker;
 use clap::{Parser, Subcommand};
-use sos::http::{AppState, CreatePayload, ExecPayload, StopPayload};
+use sos::http::{SoSState, CreatePayload, ExecPayload, StopPayload};
 use sos::sandbox::SandboxStatus;
 use tokio::sync::{Mutex, Semaphore};
 
@@ -128,7 +128,7 @@ async fn serve_command(port: u16, max_sandboxes: usize, timeout: u64) -> Result<
     // For podman, use the podman socket path
     let docker = Docker::connect_with_local_defaults()?;
     let semaphore = Arc::new(Semaphore::new(max_sandboxes));
-    let state = Arc::new(AppState {
+    let state = Arc::new(SoSState {
         docker: Arc::new(docker),
         sandboxes: Arc::new(Mutex::new(HashMap::new())),
         semaphore,

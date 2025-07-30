@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use sos::http::{AppState, create_app};
+use sos::http::{SoSState, create_app};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +14,7 @@ async fn benchmark_sandbox_throughput(
 ) -> anyhow::Result<(Duration, usize)> {
     // Set up test server
     let semaphore = Arc::new(Semaphore::new(semaphore_limit));
-    let state = Arc::new(AppState {
+    let state = Arc::new(SoSState {
         docker: Arc::new(Docker::connect_with_local_defaults()?),
         sandboxes: Arc::new(Mutex::new(HashMap::new())),
         semaphore,

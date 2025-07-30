@@ -17,33 +17,6 @@ use uuid::Uuid;
 
 use crate::sandbox::*;
 
-#[derive(Clone)]
-pub struct AppState {
-    pub docker: Arc<Docker>,
-    pub sandboxes: Arc<Mutex<HashMap<String, Arc<Mutex<Sandbox>>>>>,
-    pub semaphore: Arc<Semaphore>,
-}
-
-#[derive(Deserialize, serde::Serialize)]
-pub struct CreatePayload {
-    pub image: String,
-    pub setup_commands: Vec<String>,
-}
-
-#[derive(Deserialize, serde::Serialize)]
-pub struct ExecPayload {
-    pub command: String,
-    pub standalone: Option<bool>,
-}
-
-#[derive(Serialize)]
-pub struct SandboxInfo {
-    pub id: String,
-    pub image: String,
-    pub setup_commands: String,
-    pub status: String,
-}
-
 impl SandboxError {
     fn to_status_code(&self) -> StatusCode {
         match self {
@@ -62,8 +35,31 @@ impl SandboxError {
     }
 }
 
+
+
+/// Shared state for the SoS server.
+/// Includes the docker client, the sandboxes map, and the semaphore.
+#[derive(Clone)]
+pub struct SoSState {
+    pub docker: Arc<Docker>,
+    pub sandboxes: Arc<Mutex<HashMap<String, Arc<Mutex<Sandbox>>>>>,
+    pub semaphore: Arc<Semaphore>,
+}
+
+/// POST `/sandboxes` payload.
+/// Includes the container image to use and the setup commands to run
+/// on container startup. Setup commands will be chained together with `&&`.
+#[derive(Deserialize, serde::Serialize)]
+pub struct CreatePayload {
+    pub image: String,
+    pub setup_commands: Vec<String>,
+}
+
+/// POST `/sandboxes` handler.
+/// Creates a new sandbox with the provided image and setup commands.
+/// Assigns a new UUID to the sandbox, and returns it. Does NOT start a container.
 pub async fn create_sandbox(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<SoSState>>,
     Json(payload): Json<CreatePayload>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let id = Uuid::new_v4().to_string();
@@ -83,9 +79,14 @@ pub async fn create_sandbox(
 
 // TODO: we could read from /etc/motd to get a first message after the task.
 // Could include instructions on custom tools or w/e
+
+/// POST `/sandboxes/{id}/start` handler.
+/// Starts a sandbox with the given ID and runs the setup commands.
+/// Acquires a permit from the semaphore, and locks the sandbox until the
+/// sandbox is stopped. If no permits are available, it blocks until one is.
 pub async fn start_sandbox(
     Path(id): Path<String>,
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<SoSState>>,
 ) -> Result<(), (StatusCode, String)> {
     let permit = state
         .semaphore
@@ -113,9 +114,23 @@ pub async fn start_sandbox(
     Ok(())
 }
 
+/// POST `/sandboxes/{id}/exec` payload.
+/// Includes the command to execute and whether it should be run in standalone
+/// mode.
+#[derive(Deserialize, serde::Serialize)]
+pub struct ExecPayload {
+    pub command: String,
+    pub standalone: Option<bool>,
+}
+
+/// POST `/sandboxes/{id}/exec` handler.
+/// Executes a command in the sandbox.
+/// If the command is run in standalone mode, it will be run as a new process.
+/// Otherwise, it will be run in the existing session.
+/// Returns the stdout, stderr, and exit code of the command.
 pub async fn exec_cmd(
     Path(id): Path<String>,
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<SoSState>>,
     Json(payload): Json<ExecPayload>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let command = payload.command;
@@ -153,14 +168,20 @@ pub async fn exec_cmd(
     })))
 }
 
+/// POST `/sandboxes/{id}/stop` payload.
+/// Includes a flag for whether to remove the sandbox after stopping it.
 #[derive(Deserialize, serde::Serialize)]
 pub struct StopPayload {
     pub remove: Option<bool>,
 }
 
+/// POST `/sandboxes/{id}/stop` handler.
+/// Stops a sandbox with the given ID.
+/// If the `remove` flag is set, the sandbox will be removed from the server.
+/// Otherwise, the sandbox will be stopped and remain in the server.
 pub async fn stop_sandbox(
     Path(id): Path<String>,
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<SoSState>>,
     Json(payload): Json<StopPayload>,
 ) -> Result<(), (StatusCode, String)> {
     let sandbox_arc = {
@@ -189,9 +210,14 @@ pub async fn stop_sandbox(
     Ok(())
 }
 
+/// GET `/sandboxes/{id}/trajectory` handler.
+/// Returns the trajectory of the sandbox.
+/// The trajectory is a list of commands that have been executed in the sandbox.
+/// Each command has a timestamp, a command string, and a result.
+/// The result is the stdout, stderr, and exit code of the command.
 pub async fn get_trajectory(
     Path(id): Path<String>,
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<SoSState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let sandbox_arc = {
         let sandboxes = state.sandboxes.lock().await;
@@ -235,9 +261,13 @@ pub async fn get_trajectory(
     })))
 }
 
+/// GET `/sandboxes/{id}/trajectory/formatted` handler.
+/// Returns the trajectory of the sandbox in a formatted string.
+/// The trajectory is a list of commands that have been executed in the sandbox.
+/// Each command has a timestamp, a command string, and a result.
 pub async fn get_trajectory_formatted(
     Path(id): Path<String>,
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<SoSState>>,
 ) -> Result<String, (StatusCode, String)> {
     let sandbox_arc = {
         let sandboxes = state.sandboxes.lock().await;
@@ -251,8 +281,21 @@ pub async fn get_trajectory_formatted(
     Ok(sandbox.format_trajectory())
 }
 
+/// GET `/sandboxes` response struct.
+/// Includes the ID, image, setup commands, and status of the sandbox.
+#[derive(Serialize, Deserialize)]
+pub struct SandboxInfo {
+    pub id: String,
+    pub image: String,
+    pub setup_commands: String,
+    pub status: String,
+}
+
+/// GET `/sandboxes` handler.
+/// Returns a list of all sandboxes.
+/// Each sandbox has an ID, image, setup commands, and status.
 pub async fn list_sandboxes(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<SoSState>>,
 ) -> Result<Json<Vec<SandboxInfo>>, (StatusCode, String)> {
     // Brief global lock to clone all Arcs
     let sandbox_arcs = {
@@ -279,7 +322,8 @@ pub async fn list_sandboxes(
     Ok(Json(sandbox_list))
 }
 
-pub fn create_app(state: Arc<AppState>) -> Router {
+/// Creates a new router for the SoS server.
+pub fn create_app(state: Arc<SoSState>) -> Router {
     Router::new()
         .route("/sandboxes", post(create_sandbox).get(list_sandboxes))
         .route("/sandboxes/{id}/start", post(start_sandbox))
