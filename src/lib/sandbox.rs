@@ -323,7 +323,7 @@ impl Sandbox {
 
     pub async fn exec_session_cmd(&mut self, cmd: String) -> Result<CommandResult> {
         match self.status.clone() {
-            SandboxStatus::Started(cid) => {
+            SandboxStatus::Started(_) => {
                 // Record the command with timestamp
                 let execution_start = Instant::now();
                 let mut command_execution = CommandExecution {

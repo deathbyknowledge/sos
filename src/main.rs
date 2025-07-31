@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::Result;
 use bollard::Docker;
 use clap::{Parser, Subcommand};
-use sos::http::{SoSState, CreatePayload, ExecPayload, StopPayload};
+use sos::http::{CreatePayload, ExecPayload, SoSState, StopPayload};
 use sos::sandbox::SandboxStatus;
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{info, warn};
@@ -107,17 +107,16 @@ async fn main() -> Result<()> {
     // Initialize tracing subscriber
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| {
-                    // Default log level: info for your app, warn for dependencies
-                    "sos=info,bollard=warn,hyper=warn,tower=warn,axum=info".into()
-                })
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                // Default log level: info for your app, warn for dependencies
+                "sos=info,bollard=warn,hyper=warn,tower=warn,axum=info".into()
+            }),
         )
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
 
     info!("Starting SoS (Sea of Simulation)");
-    
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -164,10 +163,12 @@ async fn serve_command(port: u16, max_sandboxes: usize, timeout: u64) -> Result<
 
             for (id, sandbox_arc) in sandboxes.iter() {
                 let sandbox = sandbox_arc.lock().await;
-                if let Some(start_time) = sandbox.start_time {
-                    if start_time.elapsed() > timeout_duration {
-                        warn!(sandbox_id = %id, elapsed_seconds = start_time.elapsed().as_secs(), "Sandbox timed out, removing");
-                        sandboxes_to_remove.push(id.clone());
+                if let SandboxStatus::Started(_) = sandbox.get_status() {
+                    if let Some(start_time) = sandbox.start_time {
+                        if start_time.elapsed() > timeout_duration {
+                            warn!(sandbox_id = %id, elapsed_seconds = start_time.elapsed().as_secs(), "Sandbox timed out, removing");
+                            sandboxes_to_remove.push(id.clone());
+                        }
                     }
                 }
             }

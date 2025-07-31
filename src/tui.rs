@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -68,6 +68,7 @@ struct App {
     status_message: Option<String>,
     input_mode: bool,
     vim_command_buffer: String,
+    mouse_enabled: bool,
 }
 
 impl App {
@@ -101,6 +102,7 @@ impl App {
             status_message: None,
             input_mode: false,
             vim_command_buffer: String::new(),
+            mouse_enabled: true,
         }
     }
 
@@ -174,12 +176,164 @@ impl App {
                 self.detail_state.trajectory = response.text().await?;
             } else {
                 let json: Value = response.json().await?;
-                self.detail_state.trajectory = serde_json::to_string_pretty(&json)?;
+                // Use custom pretty printing for better formatting
+                self.detail_state.trajectory = self.format_json_pretty(&json);
             }
         } else {
             self.detail_state.trajectory = format!("Failed to load trajectory: {}", response.text().await?);
         }
         Ok(())
+    }
+
+    fn format_json_pretty(&self, value: &Value) -> String {
+        // Use serde_json's built-in pretty printing which handles indentation correctly
+        match serde_json::to_string_pretty(value) {
+            Ok(json) => json,
+            Err(_) => "Error formatting JSON".to_string(),
+        }
+    }
+
+    fn reset_scroll(&mut self) {
+        match self.current_screen {
+            AppScreen::SandboxList => {
+                self.list_scroll_offset = 0;
+            }
+            AppScreen::SandboxDetail(_) => {
+                self.detail_state.scroll_offset = 0;
+            }
+            AppScreen::SandboxSession(_) | AppScreen::NewSandbox => {
+                self.session_state.scroll_offset = 0;
+            }
+        }
+    }
+
+    fn handle_scroll_keys(&mut self, key: KeyCode, modifiers: KeyModifiers, viewport_height: usize) -> bool {
+        let page_size = viewport_height.saturating_sub(4); // Account for borders and margins
+        let half_page = page_size / 2;
+        
+        match (key, modifiers) {
+            // gg - go to top
+            (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                self.vim_command_buffer.push('g');
+                if self.vim_command_buffer == "gg" {
+                    match self.current_screen {
+                        AppScreen::SandboxList => {
+                            self.goto_first_sandbox();
+                        }
+                        AppScreen::SandboxDetail(_) => {
+                            self.detail_state.scroll_offset = 0;
+                        }
+                        AppScreen::SandboxSession(_) | AppScreen::NewSandbox => {
+                            self.session_state.scroll_offset = 0;
+                        }
+                    }
+                    self.vim_command_buffer.clear();
+                    return true;
+                }
+                return true;
+            }
+            // G - go to bottom
+            (KeyCode::Char('G'), KeyModifiers::SHIFT) => {
+                match self.current_screen {
+                    AppScreen::SandboxList => {
+                        self.goto_last_sandbox();
+                    }
+                    AppScreen::SandboxDetail(_) => {
+                        let max_lines = self.detail_state.trajectory.lines().count();
+                        self.detail_state.scroll_offset = max_lines.saturating_sub(viewport_height);
+                    }
+                    AppScreen::SandboxSession(_) | AppScreen::NewSandbox => {
+                        let max_lines = self.session_state.history.len();
+                        self.session_state.scroll_offset = max_lines.saturating_sub(viewport_height);
+                    }
+                }
+                self.vim_command_buffer.clear();
+                return true;
+            }
+            // Ctrl-U - scroll up half page
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                match self.current_screen {
+                    AppScreen::SandboxList => {
+                        self.selected_sandbox = self.selected_sandbox.saturating_sub(half_page);
+                    }
+                    AppScreen::SandboxDetail(_) => {
+                        self.detail_state.scroll_offset = self.detail_state.scroll_offset.saturating_sub(half_page);
+                    }
+                    AppScreen::SandboxSession(_) | AppScreen::NewSandbox => {
+                        self.session_state.scroll_offset = self.session_state.scroll_offset.saturating_sub(half_page);
+                    }
+                }
+                return true;
+            }
+            // Ctrl-D - scroll down half page
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                match self.current_screen {
+                    AppScreen::SandboxList => {
+                        let max_index = self.sandbox_list.len().saturating_sub(1);
+                        self.selected_sandbox = (self.selected_sandbox + half_page).min(max_index);
+                    }
+                    AppScreen::SandboxDetail(_) => {
+                        let max_lines = self.detail_state.trajectory.lines().count();
+                        let max_scroll = max_lines.saturating_sub(viewport_height);
+                        self.detail_state.scroll_offset = (self.detail_state.scroll_offset + half_page).min(max_scroll);
+                    }
+                    AppScreen::SandboxSession(_) | AppScreen::NewSandbox => {
+                        let max_lines = self.session_state.history.len();
+                        let max_scroll = max_lines.saturating_sub(viewport_height);
+                        self.session_state.scroll_offset = (self.session_state.scroll_offset + half_page).min(max_scroll);
+                    }
+                }
+                return true;
+            }
+            // Regular up/down
+            (KeyCode::Up | KeyCode::Char('k'), KeyModifiers::NONE) => {
+                match self.current_screen {
+                    AppScreen::SandboxList => {
+                        if self.selected_sandbox > 0 {
+                            self.selected_sandbox -= 1;
+                        }
+                    }
+                    AppScreen::SandboxDetail(_) => {
+                        self.detail_state.scroll_offset = self.detail_state.scroll_offset.saturating_sub(1);
+                    }
+                    AppScreen::SandboxSession(_) | AppScreen::NewSandbox => {
+                        self.session_state.scroll_offset = self.session_state.scroll_offset.saturating_sub(1);
+                    }
+                }
+                return true;
+            }
+            (KeyCode::Down | KeyCode::Char('j'), KeyModifiers::NONE) => {
+                match self.current_screen {
+                    AppScreen::SandboxList => {
+                        if self.selected_sandbox < self.sandbox_list.len().saturating_sub(1) {
+                            self.selected_sandbox += 1;
+                        }
+                    }
+                    AppScreen::SandboxDetail(_) => {
+                        let max_lines = self.detail_state.trajectory.lines().count();
+                        let max_scroll = max_lines.saturating_sub(viewport_height);
+                        if self.detail_state.scroll_offset < max_scroll {
+                            self.detail_state.scroll_offset += 1;
+                        }
+                    }
+                    AppScreen::SandboxSession(_) | AppScreen::NewSandbox => {
+                        let max_lines = self.session_state.history.len();
+                        let max_scroll = max_lines.saturating_sub(viewport_height);
+                        if self.session_state.scroll_offset < max_scroll {
+                            self.session_state.scroll_offset += 1;
+                        }
+                    }
+                }
+                return true;
+            }
+            _ => {
+                // Clear vim command buffer on any other key
+                if !self.vim_command_buffer.is_empty() {
+                    self.vim_command_buffer.clear();
+                }
+                return false;
+            }
+        }
     }
 
     async fn create_sandbox(&mut self) -> Result<()> {
@@ -274,13 +428,60 @@ impl App {
         Ok(())
     }
 
+    async fn toggle_mouse_mode(&mut self) -> Result<()> {
+        self.mouse_enabled = !self.mouse_enabled;
+        if self.mouse_enabled {
+            execute!(std::io::stdout(), EnableMouseCapture)?;
+            self.status_message = Some("Mouse navigation enabled".to_string());
+        } else {
+            execute!(std::io::stdout(), DisableMouseCapture)?;
+            self.status_message = Some("Mouse disabled - text selection enabled".to_string());
+        }
+        Ok(())
+    }
+
+    async fn handle_mouse_event(&mut self, mouse: MouseEvent) -> Result<()> {
+        if !self.mouse_enabled {
+            return Ok(());
+        }
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.handle_scroll_keys(KeyCode::Up, KeyModifiers::NONE, 20);
+            }
+            MouseEventKind::ScrollDown => {
+                self.handle_scroll_keys(KeyCode::Down, KeyModifiers::NONE, 20);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     async fn handle_key_event(&mut self, key: event::KeyEvent) -> Result<()> {
         if key.kind != KeyEventKind::Press {
             return Ok(());
         }
 
+        // Global key bindings that work on all screens
+        match (key.code, key.modifiers) {
+            (KeyCode::F(1), KeyModifiers::NONE) => {
+                self.toggle_mouse_mode().await?;
+                return Ok(());
+            }
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                let _ = self.copy_content_to_clipboard().await;
+                return Ok(());
+            }
+            _ => {}
+        }
+
         match self.current_screen.clone() {
             AppScreen::SandboxList => {
+                // Handle scroll keys first
+                if self.handle_scroll_keys(key.code, key.modifiers, 20) {
+                    return Ok(());
+                }
+
                 match key.code {
                     KeyCode::Char('q') => self.should_quit = true,
                     KeyCode::Char('r') => {
@@ -297,45 +498,29 @@ impl App {
                             sandbox_id: None,
                         };
                         self.input_mode = true;
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if self.selected_sandbox > 0 {
-                            self.selected_sandbox -= 1;
-                        }
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if self.selected_sandbox < self.sandbox_list.len().saturating_sub(1) {
-                            self.selected_sandbox += 1;
-                        }
-                    }
-                    KeyCode::Char('g') => {
-                        self.vim_command_buffer.push('g');
-                        if self.vim_command_buffer == "gg" {
-                            self.goto_first_sandbox();
-                            self.vim_command_buffer.clear();
-                        }
-                    }
-                    KeyCode::Char('G') => {
-                        self.goto_last_sandbox();
-                        self.vim_command_buffer.clear();
+                        self.reset_scroll();
                     }
                     KeyCode::Enter => {
                         if !self.sandbox_list.is_empty() {
                             let sandbox_id = self.sandbox_list[self.selected_sandbox].id.clone();
                             self.current_screen = AppScreen::SandboxDetail(sandbox_id.clone());
+                            self.reset_scroll();
                             self.load_trajectory(&sandbox_id).await?;
                         }
                     }
-                    _ => {
-                        // Clear vim command buffer on any other key
-                        self.vim_command_buffer.clear();
-                    }
+                    _ => {}
                 }
             }
             AppScreen::SandboxDetail(sandbox_id) => {
+                // Handle scroll keys first (estimate viewport height)
+                if !self.input_mode && self.handle_scroll_keys(key.code, key.modifiers, 20) {
+                    return Ok(());
+                }
+
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
                         self.current_screen = AppScreen::SandboxList;
+                        self.reset_scroll();
                         self.refresh_sandbox_list().await?;
                     }
                     KeyCode::Char('t') => {
@@ -347,17 +532,13 @@ impl App {
                         self.session_state.history.clear();
                         self.session_state.current_input.clear();
                         self.input_mode = true;
+                        self.reset_scroll();
                     }
                     KeyCode::Char('x') => {
                         self.stop_sandbox(&sandbox_id, true).await?;
                         self.current_screen = AppScreen::SandboxList;
+                        self.reset_scroll();
                         self.refresh_sandbox_list().await?;
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        self.detail_state.scroll_offset = self.detail_state.scroll_offset.saturating_sub(1);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        self.detail_state.scroll_offset += 1;
                     }
                     _ => {}
                 }
@@ -379,6 +560,7 @@ impl App {
                                 KeyCode::Esc => {
                                     self.current_screen = AppScreen::SandboxList;
                                     self.input_mode = false;
+                                    self.reset_scroll();
                                 }
                                 _ => {}
                             }
@@ -404,50 +586,64 @@ impl App {
                                 KeyCode::Esc => {
                                     self.current_screen = AppScreen::SandboxList;
                                     self.input_mode = false;
+                                    self.reset_scroll();
                                 }
                                 _ => {}
                             }
                         }
                         NewSandboxStep::SessionReady => {
-                            match key.code {
-                                KeyCode::Enter => {
-                                    if !self.session_state.current_input.is_empty() {
-                                        let command = self.session_state.current_input.clone();
-                                        let sandbox_id = self.new_sandbox_state.sandbox_id.clone();
-                                        self.session_state.current_input.clear();
-                                        if let Some(sandbox_id) = sandbox_id {
-                                            self.execute_command(&command, &sandbox_id).await?;
+                            // Handle scroll keys when not typing
+                            if !self.handle_scroll_keys(key.code, key.modifiers, 20) {
+                                match key.code {
+                                    KeyCode::Enter => {
+                                        if !self.session_state.current_input.is_empty() {
+                                            let command = self.session_state.current_input.clone();
+                                            let sandbox_id = self.new_sandbox_state.sandbox_id.clone();
+                                            self.session_state.current_input.clear();
+                                            if let Some(sandbox_id) = sandbox_id {
+                                                self.execute_command(&command, &sandbox_id).await?;
+                                            }
                                         }
                                     }
+                                    KeyCode::Char(c) => {
+                                        self.session_state.current_input.push(c);
+                                    }
+                                    KeyCode::Backspace => {
+                                        self.session_state.current_input.pop();
+                                    }
+                                    KeyCode::Esc => {
+                                        // Leave sandbox running, just exit session
+                                        self.current_screen = AppScreen::SandboxList;
+                                        self.input_mode = false;
+                                        self.reset_scroll();
+                                        self.refresh_sandbox_list().await?;
+                                    }
+                                    _ => {}
                                 }
-                                KeyCode::Char(c) => {
-                                    self.session_state.current_input.push(c);
-                                }
-                                KeyCode::Backspace => {
-                                    self.session_state.current_input.pop();
-                                }
-                                KeyCode::Esc => {
-                                    // Leave sandbox running, just exit session
-                                    self.current_screen = AppScreen::SandboxList;
-                                    self.input_mode = false;
-                                    self.refresh_sandbox_list().await?;
-                                }
-                                _ => {}
                             }
                         }
                         _ => {}
                     }
                 } else {
-                    match key.code {
-                        KeyCode::Esc | KeyCode::Char('q') => {
-                            self.current_screen = AppScreen::SandboxList;
+                    // Handle scroll keys when not in input mode
+                    if !self.handle_scroll_keys(key.code, key.modifiers, 20) {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                self.current_screen = AppScreen::SandboxList;
+                                self.reset_scroll();
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
             }
             AppScreen::SandboxSession(sandbox_id) => {
                 if self.input_mode {
+                    // Handle scroll keys when not typing (only when input is empty)
+                    if self.session_state.current_input.is_empty() && self.handle_scroll_keys(key.code, key.modifiers, 20) {
+                        return Ok(());
+                    }
+
                     match key.code {
                         KeyCode::Enter => {
                             if !self.session_state.current_input.is_empty() {
@@ -465,6 +661,7 @@ impl App {
                         KeyCode::Esc => {
                             self.current_screen = AppScreen::SandboxList;
                             self.input_mode = false;
+                            self.reset_scroll();
                             self.refresh_sandbox_list().await?;
                         }
                         _ => {}
@@ -472,6 +669,65 @@ impl App {
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn copy_content_to_clipboard(&mut self) -> Result<()> {
+        let content = match &self.current_screen {
+            AppScreen::SandboxDetail(_) => {
+                // Copy just the trajectory content without borders
+                self.detail_state.trajectory.clone()
+            }
+            AppScreen::SandboxSession(_) | AppScreen::NewSandbox => {
+                // Copy session history without UI elements
+                self.session_state.history.join("\n")
+            }
+            AppScreen::SandboxList => {
+                // Copy sandbox list as plain text
+                self.sandbox_list
+                    .iter()
+                    .map(|s| format!("{} | {} | {} | {}", 
+                        &s.id[..8.min(s.id.len())], 
+                        s.image, 
+                        s.status, 
+                        if s.setup_commands.is_empty() { "none" } else { &s.setup_commands }
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        };
+
+        // Try to copy to clipboard using system command
+        #[cfg(target_os = "macos")]
+        {
+            use std::process::Command;
+            let mut child = Command::new("pbcopy")
+                .stdin(std::process::Stdio::piped())
+                .spawn()?;
+            
+            if let Some(stdin) = child.stdin.as_mut() {
+                use std::io::Write;
+                stdin.write_all(content.as_bytes())?;
+            }
+            child.wait()?;
+        }
+        
+        #[cfg(target_os = "linux")]
+        {
+            use std::process::Command;
+            let mut child = Command::new("xclip")
+                .args(["-selection", "clipboard"])
+                .stdin(std::process::Stdio::piped())
+                .spawn()?;
+            
+            if let Some(stdin) = child.stdin.as_mut() {
+                use std::io::Write;
+                stdin.write_all(content.as_bytes())?;
+            }
+            child.wait()?;
+        }
+
+        self.status_message = Some("Content copied to clipboard".to_string());
         Ok(())
     }
 
@@ -550,7 +806,7 @@ impl App {
         frame.render_widget(header, chunks[0]);
 
         // Help text
-        let help_text = "↑/↓,k/j: Navigate | gg: Top | G: Bottom | Enter: View Details | n: New Sandbox | r: Refresh | q: Quit";
+        let help_text = "↑/↓,k/j: Navigate | gg: Top | G: Bottom | Ctrl-U/D: Half page | F1: Toggle Mouse/Selection | Ctrl-C: Copy Content | Enter: View Details | n: New Sandbox | r: Refresh | q: Quit";
         let help = Paragraph::new(help_text)
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Center);
@@ -652,11 +908,11 @@ impl App {
 
         let trajectory = Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(trajectory_title))
-            .wrap(Wrap { trim: true });
+            .wrap(Wrap { trim: false });
         frame.render_widget(trajectory, chunks[1]);
 
         // Help
-        let help_text = "↑/↓: Scroll | t: Toggle Format | s: Start Session | x: Stop & Remove | Esc: Back";
+        let help_text = "↑/↓,k/j: Scroll | gg: Top | G: Bottom | Ctrl-U/D: Half page | F1: Toggle Mouse/Selection | Ctrl-C: Copy Content | t: Toggle Format | s: Start Session | x: Stop & Remove | Esc: Back";
         let help = Paragraph::new(help_text)
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Center);
@@ -743,7 +999,7 @@ impl App {
         }
 
         // Help
-        let help_text = "Follow the prompts | Esc: Cancel and return to main menu";
+        let help_text = "Follow the prompts | Ctrl-C: Copy Content | Esc: Cancel and return to main menu";
         let help = Paragraph::new(help_text)
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Center);
@@ -772,7 +1028,7 @@ impl App {
         self.draw_session_content(frame, chunks[1]);
 
         // Help
-        let help_text = "Type commands and press Enter | Esc: Exit session (leave sandbox running)";
+        let help_text = "Type commands and press Enter | ↑/↓,k/j: Scroll (when input empty) | gg: Top | G: Bottom | Ctrl-U/D: Half page | F1: Toggle Mouse/Selection | Ctrl-C: Copy Content | Esc: Exit session";
         let help = Paragraph::new(help_text)
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Center);
@@ -795,7 +1051,7 @@ impl App {
 
         let history = Paragraph::new(history_lines)
             .block(Block::default().borders(Borders::ALL).title("Output"))
-            .wrap(Wrap { trim: true });
+            .wrap(Wrap { trim: false });
         frame.render_widget(history, chunks[0]);
 
         // Input
@@ -830,8 +1086,14 @@ async fn main() -> Result<()> {
         terminal.draw(|f| app.draw(f))?;
 
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                app.handle_key_event(key).await?;
+            match event::read()? {
+                Event::Key(key) => {
+                    app.handle_key_event(key).await?;
+                }
+                Event::Mouse(mouse) => {
+                    app.handle_mouse_event(mouse).await?;
+                }
+                _ => {}
             }
         }
 
