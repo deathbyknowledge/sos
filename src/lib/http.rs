@@ -147,8 +147,7 @@ pub async fn exec_cmd(
     let standalone = payload.standalone.unwrap_or(false);
 
     let CommandResult {
-        stdout,
-        stderr,
+        output,
         exit_code,
     } = match standalone {
         true => sandbox_guard
@@ -162,8 +161,7 @@ pub async fn exec_cmd(
     };
 
     Ok(Json(serde_json::json!({
-        "stdout": stdout,
-        "stderr": stderr,
+        "output": output,
         "exit_code": exit_code
     })))
 }
@@ -244,8 +242,7 @@ pub async fn get_trajectory(
 
             if let Some(result) = &cmd.result {
                 cmd_json["result"] = serde_json::json!({
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
+                    "output": result.output,
                     "exit_code": result.exit_code,
                 });
             }

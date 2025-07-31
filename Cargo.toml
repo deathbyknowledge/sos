@@ -2,6 +2,7 @@
 name = "sos"
 version = "0.0.3"
 edition = "2024"
+default-run = "sos"
 
 [lib]
 name = "sos"
@@ -10,6 +11,11 @@ path = "src/lib/mod.rs"
 [[bin]]
 name = "sos"
 path = "src/main.rs"
+
+[[bin]]
+name = "sos-tui"
+path = "src/tui.rs"
+
 
 [[bench]]
 name = "sandbox_performance"
@@ -28,6 +34,10 @@ uuid = {version = "1.17.0", features = ["v4"]}
 clap = { version = "4.5", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 thiserror = "2.0.12"
+ratatui = "0.28"
+crossterm = "0.28"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

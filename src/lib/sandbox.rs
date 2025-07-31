@@ -13,6 +13,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio::time::{self, Duration, Instant};
 use tokio::{io::AsyncWriteExt, sync::OwnedSemaphorePermit};
+use tracing::error;
 
 type Result<T> = std::result::Result<T, SandboxError>;
 
@@ -68,8 +69,7 @@ pub struct CommandExecution {
 
 #[derive(Debug, Clone)]
 pub struct CommandResult {
-    pub stdout: String,
-    pub stderr: String,
+    pub output: String,
     pub exit_code: i64,
 }
 
@@ -92,7 +92,6 @@ macro_rules! cmd {
         format!("'{}'", $cmd.replace("'", "'\\''"))
     };
 }
-
 
 impl Sandbox {
     pub fn new(id: String, image: String, setup_commands: String, docker: Arc<Docker>) -> Self {
@@ -159,12 +158,8 @@ impl Sandbox {
 
             match &cmd.result {
                 Some(result) => {
-                    if !result.stdout.is_empty() {
-                        output.push_str(&result.stdout);
-                        output.push('\n');
-                    }
-                    if !result.stderr.is_empty() {
-                        output.push_str(&result.stderr);
+                    if !result.output.is_empty() {
+                        output.push_str(&result.output);
                         output.push('\n');
                     }
                 }
@@ -241,7 +236,7 @@ impl Sandbox {
         let config = bollard::models::ContainerCreateBody {
             image: Some(self.image.clone()),
             cmd: Some(vec!["/bin/bash".to_string(), "-i".to_string()]),
-            tty: Some(false),
+            tty: Some(true),
             open_stdin: Some(true),
             attach_stdin: Some(true),
             attach_stdout: Some(true),
@@ -263,15 +258,11 @@ impl Sandbox {
             .map_err(|e| SandboxError::StartContainerFailed(e.to_string()))?;
 
         if !self.setup_commands.is_empty() {
-            let CommandResult {
-                stderr,
-                exit_code,
-                stdout: _,
-            } = self
+            let CommandResult { output, exit_code } = self
                 .exec_standalone_cmd(self.setup_commands.clone())
                 .await?;
             if exit_code != 0 {
-                return Err(SandboxError::SetupCommandsFailed(stderr));
+                return Err(SandboxError::SetupCommandsFailed(output));
             }
         }
 
@@ -300,6 +291,7 @@ impl Sandbox {
                     let bytes = match chunk {
                         LogOutput::StdOut { message } => message,
                         LogOutput::StdErr { message } => message,
+                        LogOutput::Console { message } => message,
                         _ => continue,
                     };
                     let _ = tx.unbounded_send(bytes);
@@ -342,8 +334,7 @@ impl Sandbox {
 
                 if command_execution.command.trim_start().starts_with('#') {
                     let result = CommandResult {
-                        stdout: "".to_string(),
-                        stderr: "".to_string(),
+                        output: "".to_string(),
                         exit_code: 0,
                     };
                     command_execution.result = Some(result.clone());
@@ -352,15 +343,15 @@ impl Sandbox {
                 }
 
                 let command_id = self.command_id.fetch_add(1, Ordering::Relaxed);
-                let stdout_file = format!("/tmp/stdout_{}.txt", command_id);
-                let stderr_file = format!("/tmp/stderr_{}.txt", command_id);
+                let stdout_file = format!("/tmp/output_{}.txt", command_id);
+                // let stderr_file = format!("/tmp/stderr_{}.txt", command_id);
                 let exitcode_file = format!("/tmp/exitcode_{}.txt", command_id);
                 let marker = format!("COMMAND_DONE_{}", command_id);
 
                 let grouped_command = format!("{{ eval {} ; }}", cmd!(cmd));
                 let cmd_to_send = format!(
-                    "{} > {} 2> {}; echo $? > {}; echo '{}'\n",
-                    grouped_command, stdout_file, stderr_file, exitcode_file, marker
+                    "{} &> {}; echo $? > {}; echo '{}'\n",
+                    grouped_command, stdout_file, exitcode_file, marker
                 );
 
                 {
@@ -370,39 +361,35 @@ impl Sandbox {
                         .ok_or(SandboxError::NotStarted)?
                         .lock()
                         .await;
-                    input
-                        .write_all(cmd_to_send.as_bytes())
-                        .await
-                        .map_err(|e| {
-                            println!("Error writing to container: {}", e);
-                            SandboxError::ContainerWriteFailed(e.to_string())
-                        })?;
+                    input.write_all(cmd_to_send.as_bytes()).await.map_err(|e| {
+                        error!("Error writing to container: {}", e);
+                        SandboxError::ContainerWriteFailed(e.to_string())
+                    })?;
                 }
 
                 self.read_until_marker(&marker, 20.0).await?;
 
                 // Read all three files in a single exec command with delimiters
                 let combined_cmd = format!(
-                    "echo 'STDOUT_START'; cat {}; echo 'STDOUT_END'; echo 'STDERR_START'; cat {}; echo 'STDERR_END'; echo 'EXITCODE_START'; cat {}; echo 'EXITCODE_END'",
-                    stdout_file, stderr_file, exitcode_file
+                    "echo 'OUTPUT_START'; cat {}; echo 'OUTPUT_END'; echo 'EXITCODE_START'; cat {}; echo 'EXITCODE_END'",
+                    stdout_file, exitcode_file
                 );
 
                 let CommandResult {
-                    stdout: combined_output,
-                    stderr: combined_stderr,
+                    output: combined_output,
                     exit_code: exec_exit_code,
                 } = self.exec_standalone_cmd(combined_cmd).await?;
 
                 if exec_exit_code != 0 {
-                    println!("Exec failed when reading combined outputs: {}, {}", combined_output, combined_stderr);
+                    error!(
+                        "Exec failed when reading combined outputs: {}",
+                        combined_output
+                    );
                     return Err(SandboxError::ExecFailed(combined_output, exec_exit_code));
                 }
 
                 // Parse the combined output
-                let stdout = extract_section(&combined_output, "STDOUT_START", "STDOUT_END")
-                    .trim_end_matches('\n')
-                    .to_string();
-                let stderr = extract_section(&combined_output, "STDERR_START", "STDERR_END")
+                let output = extract_section(&combined_output, "OUTPUT_START", "OUTPUT_END")
                     .trim_end_matches('\n')
                     .to_string();
                 let exit_code_str =
@@ -410,55 +397,29 @@ impl Sandbox {
                         .trim()
                         .to_string();
 
-                // Since we're non-tty, stderr is prefixed by `bash: `, so we need to remove that
-                let stderr = stderr.trim_start_matches("bash: ").to_string();
-
                 let exit_code = exit_code_str.parse::<i64>().unwrap_or(-1);
 
                 // Store the result in trajectory
                 let result = CommandResult {
-                    stdout,
-                    stderr,
+                    output: output.clone(),
                     exit_code,
                 };
                 command_execution.result = Some(result.clone());
                 self.trajectory.push(command_execution);
 
                 // Clean up files
-                let clean_cmd = vec![
-                    "rm".to_string(),
-                    stdout_file.clone(),
-                    stderr_file.clone(),
-                    exitcode_file.clone(),
-                ];
-                let exec_config = CreateExecOptions {
-                    cmd: Some(clean_cmd),
-                    attach_stdout: Some(false),
-                    attach_stderr: Some(false),
-                    attach_stdin: Some(false),
-                    ..Default::default()
-                };
+                let clean_cmd = format!("rm {} {}", stdout_file, exitcode_file);
 
-                let exec = self
-                    .docker
-                    .create_exec(&cid, exec_config)
-                    .await
-                    .map_err(|e| SandboxError::CreateExecFailed(e.to_string()))?;
+                let CommandResult {
+                    exit_code: rm_exit_code,
+                    ..
+                } = self.exec_standalone_cmd(clean_cmd).await?;
 
-                self.docker
-                    .start_exec(
-                        &exec.id,
-                        Some(StartExecOptions {
-                            detach: true,
-                            tty: false,
-                            ..Default::default()
-                        }),
-                    )
-                    .await
-                    .map_err(|e| SandboxError::CreateExecFailed(e.to_string()))?;
+                if rm_exit_code != 0 {
+                    error!("Failed to clean up files: {}", output);
+                }
 
                 self.drain(0.5).await?;
-                
 
                 return Ok(result);
             }
@@ -489,13 +450,13 @@ impl Sandbox {
             .start_exec(&exec.id, None::<StartExecOptions>)
             .await
             .map_err(|e| SandboxError::CreateExecFailed(e.to_string()))?;
-        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let mut out = Vec::new();
         if let StartExecResults::Attached { output, .. } = start_res {
             let mut output = output;
             while let Some(item) = output.next().await {
                 match item.map_err(|e| SandboxError::ContainerReadFailed(e.to_string()))? {
-                    bollard::container::LogOutput::StdOut { message } => stdout.extend(&message),
-                    bollard::container::LogOutput::StdErr { message } => stderr.extend(&message),
+                    bollard::container::LogOutput::StdOut { message } => out.extend(&message),
+                    bollard::container::LogOutput::StdErr { message } => out.extend(&message),
                     _ => {}
                 }
             }
@@ -505,12 +466,12 @@ impl Sandbox {
             .inspect_exec(&exec.id)
             .await
             .map_err(|e| SandboxError::ContainerReadFailed(e.to_string()))?;
-        let exit_code = inspect.exit_code.expect("Exit code not present in inspect exec");
-        let stdout_str = String::from_utf8_lossy(&stdout).to_string();
-        let stderr_str = String::from_utf8_lossy(&stderr).to_string();
+        let exit_code = inspect
+            .exit_code
+            .expect("Exit code not present in inspect exec");
+        let out_str = String::from_utf8_lossy(&out).to_string();
         Ok(CommandResult {
-            stdout: stdout_str,
-            stderr: stderr_str,
+            output: out_str,
             exit_code,
         })
     }

@@ -100,13 +100,13 @@ async fn test_sandbox_endpoints_flow() {
         .json()
         .await
         .expect("Failed to parse exec response");
-    assert_eq!(
-        exec_result["stdout"], "Hello, World!",
-        "Stdout should be 'Hello, World!'"
+    assert!(
+        exec_result["output"].as_str().unwrap().contains("Hello, World!"),
+        "Output should contain 'Hello, World!'"
     );
-    assert_eq!(
-        exec_result["stderr"], "cd: not-exists: No such file or directory",
-        "Stderr should not be empty"
+    assert!(
+        exec_result["output"].as_str().unwrap().contains("cd: not-exists: No such file or directory"),
+        "Output should contain 'cd: not-exists: No such file or directory'"
     );
     assert_eq!(exec_result["exit_code"], 1, "Exit code should be 1");
     println!("Executed command successfully: {:?}", exec_result);
@@ -135,8 +135,8 @@ async fn test_sandbox_endpoints_flow() {
         "Comment should return exit code 0"
     );
     assert_eq!(
-        comment_result["stdout"], "",
-        "Comment should return empty stdout"
+        comment_result["output"], "",
+        "Comment should return empty output"
     );
     println!("Comment command handled correctly");
 
@@ -177,7 +177,7 @@ async fn test_sandbox_endpoints_flow() {
         "Comment should return exit code 0"
     );
     assert_eq!(
-        exec_result["stdout"],
+        exec_result["output"],
         "Setting up",
         "Stdout should be 'Setting up'"
     );
@@ -206,7 +206,7 @@ async fn test_sandbox_endpoints_flow() {
         exec_result["exit_code"], 0,
         "Comment should return exit code 0"
     );
-    assert_eq!(exec_result["stdout"], "/\n", "Stdout should be '/\n'");
+    assert_eq!(exec_result["output"], "/\n", "Stdout should be '/\n'");
 
     // Test 7: Make sure piping works
     println!("Testing piping...");
@@ -228,8 +228,9 @@ async fn test_sandbox_endpoints_flow() {
         .await
         .expect("Failed to parse exec response");
     assert_eq!(
-        exec_result["stdout"], "Hello, World!!",
-        "Stdout should be 'Hello, World!'"
+        exec_result["output"].as_str().unwrap().contains("Hello, World!!"),
+        true,
+        "Output should contain 'Hello, World!!'"
     );
     assert_eq!(
         exec_result["exit_code"], 0,

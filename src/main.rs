@@ -9,6 +9,8 @@ use clap::{Parser, Subcommand};
 use sos::http::{SoSState, CreatePayload, ExecPayload, StopPayload};
 use sos::sandbox::SandboxStatus;
 use tokio::sync::{Mutex, Semaphore};
+use tracing::{info, warn};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
 #[command(name = "sos")]
@@ -102,6 +104,20 @@ enum SandboxCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize tracing subscriber
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| {
+                    // Default log level: info for your app, warn for dependencies
+                    "sos=info,bollard=warn,hyper=warn,tower=warn,axum=info".into()
+                })
+        )
+        .with(tracing_subscriber::fmt::layer().with_target(true))
+        .init();
+
+    info!("Starting SoS (Sea of Simulation)");
+    
     let cli = Cli::parse();
 
     match cli.command {
@@ -120,9 +136,11 @@ async fn main() -> Result<()> {
 }
 
 async fn serve_command(port: u16, max_sandboxes: usize, timeout: u64) -> Result<()> {
-    println!(
-        "Starting sandbox server on port {} with max {} sandboxes",
-        port, max_sandboxes
+    info!(
+        port = port,
+        max_sandboxes = max_sandboxes,
+        timeout_seconds = timeout,
+        "Starting sandbox server"
     );
 
     // For podman, use the podman socket path
@@ -148,7 +166,7 @@ async fn serve_command(port: u16, max_sandboxes: usize, timeout: u64) -> Result<
                 let sandbox = sandbox_arc.lock().await;
                 if let Some(start_time) = sandbox.start_time {
                     if start_time.elapsed() > timeout_duration {
-                        println!("Sandbox {} timed out. Removing.", id);
+                        warn!(sandbox_id = %id, elapsed_seconds = start_time.elapsed().as_secs(), "Sandbox timed out, removing");
                         sandboxes_to_remove.push(id.clone());
                     }
                 }
@@ -175,7 +193,7 @@ async fn serve_command(port: u16, max_sandboxes: usize, timeout: u64) -> Result<
     let app = sos::http::create_app(state);
 
     let bind_addr = format!("0.0.0.0:{}", port);
-    println!("Server listening on {}", bind_addr);
+    info!(bind_address = %bind_addr, "Server listening");
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     axum::serve(listener, app.into_make_service()).await?;
@@ -288,15 +306,11 @@ async fn sandbox_command(server: String, action: SandboxCommands) -> Result<()> 
 
             if response.status().is_success() {
                 let result: serde_json::Value = response.json().await?;
-                let stdout = result["stdout"].as_str().unwrap_or("");
-                let stderr = result["stderr"].as_str().unwrap_or("");
+                let output = result["output"].as_str().unwrap_or("");
                 let exit_code = result["exit_code"].as_i64().unwrap_or(-1);
 
-                if !stdout.is_empty() {
-                    println!("{}", stdout);
-                }
-                if !stderr.is_empty() {
-                    eprintln!("{}", stderr);
+                if !output.is_empty() {
+                    println!("{}", output);
                 }
 
                 if exit_code != 0 {
@@ -445,15 +459,11 @@ async fn session_command(server: String, image: String, setup: Vec<String>) -> R
 
         if response.status().is_success() {
             let result: serde_json::Value = response.json().await?;
-            let stdout = result["stdout"].as_str().unwrap_or("");
-            let stderr = result["stderr"].as_str().unwrap_or("");
+            let output = result["output"].as_str().unwrap_or("");
             let exit_code = result["exit_code"].as_i64().unwrap_or(-1);
 
-            if !stdout.is_empty() {
-                print!("{}", stdout);
-            }
-            if !stderr.is_empty() {
-                eprint!("{}", stderr);
+            if !output.is_empty() {
+                print!("{}", output);
             }
 
             // Don't exit the session on command failure, just show exit code
