@@ -286,6 +286,8 @@ pub struct SandboxInfo {
     pub image: String,
     pub setup_commands: String,
     pub status: String,
+    pub session_command_count: usize,
+    pub last_standalone_exit_code: Option<i64>,
 }
 
 /// GET `/sandboxes` handler.
@@ -311,6 +313,8 @@ pub async fn list_sandboxes(
                 image: sandbox.image.clone(),
                 setup_commands: sandbox.setup_commands.clone(),
                 status: status.to_string(),
+                session_command_count: sandbox.command_count(),
+                last_standalone_exit_code: sandbox.get_last_standalone_exit_code(),
             }
         })
         .collect();

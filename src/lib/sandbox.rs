@@ -85,6 +85,7 @@ pub struct Sandbox {
     command_id: AtomicU32,
     docker: Arc<Docker>,
     trajectory: Vec<CommandExecution>,
+    last_standalone_exit_code: Option<i64>,
 }
 
 macro_rules! cmd {
@@ -107,6 +108,7 @@ impl Sandbox {
             output_receiver: None,
             start_time: None,
             trajectory: Vec::new(),
+            last_standalone_exit_code: None,
         }
     }
 
@@ -148,6 +150,11 @@ impl Sandbox {
             .iter()
             .filter(|cmd| cmd.result.as_ref().map_or(true, |r| r.exit_code != 0))
             .collect()
+    }
+
+    /// Get the last standalone command exit code
+    pub fn get_last_standalone_exit_code(&self) -> Option<i64> {
+        self.last_standalone_exit_code
     }
 
     /// Format the trajectory as a human-readable string
@@ -427,7 +434,7 @@ impl Sandbox {
         }
     }
 
-    pub async fn exec_standalone_cmd(&self, cmd: String) -> Result<CommandResult> {
+    pub async fn exec_standalone_cmd(&mut self, cmd: String) -> Result<CommandResult> {
         let cid = match &self.status {
             SandboxStatus::Started(cid) => cid,
             _ => return Err(SandboxError::NotStarted),
@@ -469,6 +476,7 @@ impl Sandbox {
         let exit_code = inspect
             .exit_code
             .expect("Exit code not present in inspect exec");
+        self.last_standalone_exit_code = Some(exit_code);
         let out_str = String::from_utf8_lossy(&out).to_string();
         Ok(CommandResult {
             output: out_str,

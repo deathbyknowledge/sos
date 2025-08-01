@@ -721,12 +721,20 @@ impl App {
                 // Copy sandbox list as plain text
                 self.sandbox_list
                     .iter()
-                    .map(|s| format!("{} | {} | {} | {}", 
-                        &s.id[..8.min(s.id.len())], 
-                        s.image, 
-                        s.status, 
-                        if s.setup_commands.is_empty() { "none" } else { &s.setup_commands }
-                    ))
+                    .map(|s| {
+                        let last_exit = match s.last_standalone_exit_code {
+                            Some(code) => code.to_string(),
+                            None => "N/A".to_string(),
+                        };
+                        format!("{} | {} | {} | {} | {} | {}", 
+                            &s.id[..8.min(s.id.len())], 
+                            s.image, 
+                            s.status,
+                            s.session_command_count,
+                            last_exit,
+                            if s.setup_commands.is_empty() { "none" } else { &s.setup_commands }
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             }
@@ -873,15 +881,21 @@ impl App {
                 .skip(self.list_scroll_offset)
                 .take(viewport_height.saturating_sub(2)) // Account for borders
                 .map(|(i, sandbox)| {
+                    let last_exit = match sandbox.last_standalone_exit_code {
+                        Some(code) => code.to_string(),
+                        None => "N/A".to_string(),
+                    };
                     let content = format!(
-                        "{:<8} | {:<20} | {:<10} | {}",
+                        "{:<8} | {:<15} | {:<8} | {:<4} | {:<4} | {}",
                         &sandbox.id[..8.min(sandbox.id.len())],
                         sandbox.image,
                         sandbox.status,
+                        sandbox.session_command_count,
+                        last_exit,
                         if sandbox.setup_commands.is_empty() { 
                             "none".to_string() 
-                        } else if sandbox.setup_commands.len() > 30 {
-                            format!("{}...", &sandbox.setup_commands[..27])
+                        } else if sandbox.setup_commands.len() > 20 {
+                            format!("{}...", &sandbox.setup_commands[..17])
                         } else {
                             sandbox.setup_commands.clone()
                         }
