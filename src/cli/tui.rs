@@ -187,6 +187,37 @@ impl App {
         Ok(())
     }
 
+    async fn load_trajectory_into_session_history(&mut self, sandbox_id: &str) -> Result<()> {
+        // Always load the formatted trajectory for session history
+        let endpoint = format!("{}/sandboxes/{}/trajectory/formatted", self.server_url, sandbox_id);
+        let response = self.client.get(&endpoint).send().await?;
+
+        if response.status().is_success() {
+            let trajectory_text = response.text().await?;
+            self.session_state.history.clear();
+            
+            // Parse trajectory into session history
+            for line in trajectory_text.lines() {
+                // Skip empty lines at the start, but include them if they're between commands
+                if !line.trim().is_empty() || !self.session_state.history.is_empty() {
+                    self.session_state.history.push(line.to_string());
+                }
+            }
+            
+            // If we have history, add a separator to distinguish old vs new commands
+            if !self.session_state.history.is_empty() {
+                self.session_state.history.push("--- Continued session ---".to_string());
+            }
+            
+            // Auto-scroll to bottom to show the latest content
+            self.session_state.scroll_offset = self.session_state.history.len().saturating_sub(20);
+        } else {
+            self.session_state.history.clear();
+            self.session_state.history.push(format!("Failed to load command history: {}", response.text().await?));
+        }
+        Ok(())
+    }
+
     fn format_json_pretty(&self, value: &Value) -> String {
         // Use serde_json's built-in pretty printing which handles indentation correctly
         match serde_json::to_string_pretty(value) {
@@ -531,7 +562,7 @@ impl App {
                     }
                     KeyCode::Char('s') => {
                         self.current_screen = AppScreen::SandboxSession(sandbox_id.clone());
-                        self.session_state.history.clear();
+                        self.load_trajectory_into_session_history(&sandbox_id).await?;
                         self.session_state.current_input.clear();
                         self.input_mode = true;
                         self.reset_scroll();
@@ -594,33 +625,35 @@ impl App {
                             }
                         }
                         NewSandboxStep::SessionReady => {
-                            // Handle scroll keys when not typing
-                            if !self.handle_scroll_keys(key.code, key.modifiers, 20) {
-                                match key.code {
-                                    KeyCode::Enter => {
-                                        if !self.session_state.current_input.is_empty() {
-                                            let command = self.session_state.current_input.clone();
-                                            let sandbox_id = self.new_sandbox_state.sandbox_id.clone();
-                                            self.session_state.current_input.clear();
-                                            if let Some(sandbox_id) = sandbox_id {
-                                                self.execute_command(&command, &sandbox_id).await?;
-                                            }
+                            match key.code {
+                                KeyCode::Enter => {
+                                    if !self.session_state.current_input.is_empty() {
+                                        let command = self.session_state.current_input.clone();
+                                        let sandbox_id = self.new_sandbox_state.sandbox_id.clone();
+                                        self.session_state.current_input.clear();
+                                        if let Some(sandbox_id) = sandbox_id {
+                                            self.execute_command(&command, &sandbox_id).await?;
                                         }
                                     }
-                                    KeyCode::Char(c) => {
-                                        self.session_state.current_input.push(c);
+                                }
+                                KeyCode::Char(c) => {
+                                    self.session_state.current_input.push(c);
+                                }
+                                KeyCode::Backspace => {
+                                    self.session_state.current_input.pop();
+                                }
+                                KeyCode::Esc => {
+                                    // Leave sandbox running, just exit session
+                                    self.current_screen = AppScreen::SandboxList;
+                                    self.input_mode = false;
+                                    self.reset_scroll();
+                                    self.refresh_sandbox_list().await?;
+                                }
+                                // Only handle scroll keys when input is empty (not actively typing)
+                                _ => {
+                                    if self.session_state.current_input.is_empty() {
+                                        self.handle_scroll_keys(key.code, key.modifiers, 20);
                                     }
-                                    KeyCode::Backspace => {
-                                        self.session_state.current_input.pop();
-                                    }
-                                    KeyCode::Esc => {
-                                        // Leave sandbox running, just exit session
-                                        self.current_screen = AppScreen::SandboxList;
-                                        self.input_mode = false;
-                                        self.reset_scroll();
-                                        self.refresh_sandbox_list().await?;
-                                    }
-                                    _ => {}
                                 }
                             }
                         }
@@ -641,11 +674,6 @@ impl App {
             }
             AppScreen::SandboxSession(sandbox_id) => {
                 if self.input_mode {
-                    // Handle scroll keys when not typing (only when input is empty)
-                    if self.session_state.current_input.is_empty() && self.handle_scroll_keys(key.code, key.modifiers, 20) {
-                        return Ok(());
-                    }
-
                     match key.code {
                         KeyCode::Enter => {
                             if !self.session_state.current_input.is_empty() {
@@ -666,7 +694,12 @@ impl App {
                             self.reset_scroll();
                             self.refresh_sandbox_list().await?;
                         }
-                        _ => {}
+                        // Only handle scroll keys when input is empty (not actively typing)
+                        _ => {
+                            if self.session_state.current_input.is_empty() {
+                                self.handle_scroll_keys(key.code, key.modifiers, 20);
+                            }
+                        }
                     }
                 }
             }
@@ -759,6 +792,9 @@ impl App {
         } else if line.starts_with("Sandbox") && line.contains("started successfully") {
             // Success message - green
             Line::from(line.to_string()).style(Style::default().fg(Color::Green))
+        } else if line.starts_with("--- Continued session ---") {
+            // Session separator - magenta and bold
+            Line::from(line.to_string()).style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
         } else {
             // Regular output - default color
             Line::from(line.to_string())
