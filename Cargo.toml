@@ -33,6 +33,7 @@ ratatui = "0.28"
 crossterm = "0.28"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+strip-ansi-escapes = "0.2.0"
 
 [dev-dependencies]
 tokio-test = "0.4"

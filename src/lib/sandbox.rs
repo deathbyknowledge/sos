@@ -8,12 +8,13 @@ use bollard::{
 };
 use bytes::Bytes;
 use futures::{StreamExt, channel::mpsc::UnboundedReceiver};
-use std::sync::atomic::{AtomicU32, Ordering};
+use strip_ansi_escapes::strip_str;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio::time::{self, Duration, Instant};
 use tokio::{io::AsyncWriteExt, sync::OwnedSemaphorePermit};
 use tracing::error;
+use uuid::Uuid;
 
 type Result<T> = std::result::Result<T, SandboxError>;
 
@@ -82,26 +83,18 @@ pub struct Sandbox {
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
     input: Option<Mutex<Pin<Box<dyn tokio::io::AsyncWrite + Send>>>>,
     output_receiver: Option<Mutex<UnboundedReceiver<Bytes>>>,
-    command_id: AtomicU32,
     docker: Arc<Docker>,
     trajectory: Vec<CommandExecution>,
     last_standalone_exit_code: Option<i64>,
 }
 
-macro_rules! cmd {
-    ($cmd:expr) => {
-        format!("'{}'", $cmd.replace("'", "'\\''"))
-    };
-}
-
 impl Sandbox {
-    pub fn new(id: String, image: String, setup_commands: String, docker: Arc<Docker>) -> Self {
+    pub fn new(image: String, setup_commands: String, docker: Arc<Docker>) -> Self {
         Sandbox {
-            id,
+            id: Uuid::new_v4().to_string(),
             image,
             setup_commands,
             docker,
-            command_id: AtomicU32::new(0),
             status: SandboxStatus::Created,
             permit: None,
             input: None,
@@ -110,6 +103,12 @@ impl Sandbox {
             trajectory: Vec::new(),
             last_standalone_exit_code: None,
         }
+    }
+
+    // We use PS1 to track the end of command outputs AND their exit codes.
+    // To make jailbreaking harder, we use the sandbox UUID as the PS1 marker.
+    fn get_marker(&self) -> String {
+        format!("#{}#:", self.id.clone())
     }
 
     pub fn get_status(&self) -> SandboxStatus {
@@ -124,32 +123,6 @@ impl Sandbox {
     /// Get the number of commands executed
     pub fn command_count(&self) -> usize {
         self.trajectory.len()
-    }
-
-    /// Get the latest command execution
-    pub fn get_latest_command(&self) -> Option<&CommandExecution> {
-        self.trajectory.last()
-    }
-
-    /// Get a specific command by index
-    pub fn get_command(&self, index: usize) -> Option<&CommandExecution> {
-        self.trajectory.get(index)
-    }
-
-    /// Get all successful commands (exit code 0)
-    pub fn get_successful_commands(&self) -> Vec<&CommandExecution> {
-        self.trajectory
-            .iter()
-            .filter(|cmd| cmd.result.as_ref().map_or(false, |r| r.exit_code == 0))
-            .collect()
-    }
-
-    /// Get all failed commands (exit code != 0)
-    pub fn get_failed_commands(&self) -> Vec<&CommandExecution> {
-        self.trajectory
-            .iter()
-            .filter(|cmd| cmd.result.as_ref().map_or(true, |r| r.exit_code != 0))
-            .collect()
     }
 
     /// Get the last standalone command exit code
@@ -314,9 +287,12 @@ impl Sandbox {
         {
             // `stty -echo` disables stdin from being echoed to the terminal.
             // `set +H` disables shell history expansion. (e.g. String containing `!!` will not expand to the last command)
+            // `bind 'set enable-bracketed-paste off'` disables bracketed paste mode which adds a lot of noise to the output.
+            // `PS1='{self.get_marker()}$?:'` sets the prompt to include the exit code of the last standalone command.
+            // `PS2=''` disables the input prompt, should never be used anyway but just in case.
             let mut input_guard = self.input.as_ref().unwrap().lock().await;
             input_guard
-                .write_all("stty -echo; set +H\n".as_bytes())
+                .write_all(format!("stty -echo; bind 'set enable-bracketed-paste off'; PS1='{}$?:'; PS2=''; readonly PS1; readonly PS2\n", self.get_marker()).as_bytes())
                 .await
                 .map_err(|e| SandboxError::ContainerWriteFailed(e.to_string()))?;
         }
@@ -348,19 +324,7 @@ impl Sandbox {
                     self.trajectory.push(command_execution);
                     return Ok(result);
                 }
-
-                let command_id = self.command_id.fetch_add(1, Ordering::Relaxed);
-                let stdout_file = format!("/tmp/output_{}.txt", command_id);
-                // let stderr_file = format!("/tmp/stderr_{}.txt", command_id);
-                let exitcode_file = format!("/tmp/exitcode_{}.txt", command_id);
-                let marker = format!("COMMAND_DONE_{}", command_id);
-
-                let grouped_command = format!("{{ eval {} ; }}", cmd!(cmd));
-                let cmd_to_send = format!(
-                    "{} &> {}; echo $? > {}; echo '{}'\n",
-                    grouped_command, stdout_file, exitcode_file, marker
-                );
-
+                // Write raw command
                 {
                     let mut input = self
                         .input
@@ -368,67 +332,46 @@ impl Sandbox {
                         .ok_or(SandboxError::NotStarted)?
                         .lock()
                         .await;
-                    input.write_all(cmd_to_send.as_bytes()).await.map_err(|e| {
-                        error!("Error writing to container: {}", e);
-                        SandboxError::ContainerWriteFailed(e.to_string())
-                    })?;
+                    input
+                        .write_all(format!("{}\n", cmd).as_bytes())
+                        .await
+                        .map_err(|e| {
+                            error!("Error writing to container: {}", e);
+                            SandboxError::ContainerWriteFailed(e.to_string())
+                        })?;
                 }
 
-                self.read_until_marker(&marker, 20.0).await?;
+                // Read until prompt marker
+                let output_raw = self.read_until_marker(&self.get_marker(), 20.0).await?;
 
-                // Read all three files in a single exec command with delimiters
-                let combined_cmd = format!(
-                    "echo 'OUTPUT_START'; cat {}; echo 'OUTPUT_END'; echo 'EXITCODE_START'; cat {}; echo 'EXITCODE_END'",
-                    stdout_file, exitcode_file
-                );
+                // Clean the output
+                let cleaned = clean_terminal_output(&output_raw);
 
-                let CommandResult {
-                    output: combined_output,
-                    exit_code: exec_exit_code,
-                } = self.exec_standalone_cmd(combined_cmd).await?;
+                // Find the position of the marker in cleaned output
+                let marker_pos = cleaned.rfind(&self.get_marker()).unwrap_or(0);
 
-                if exec_exit_code != 0 {
-                    error!(
-                        "Exec failed when reading combined outputs: {}",
-                        combined_output
-                    );
-                    return Err(SandboxError::ExecFailed(combined_output, exec_exit_code));
-                }
+                // Extract command output (before marker)
+                let command_output = cleaned[..marker_pos].trim_end().to_string();
 
-                // Parse the combined output
-                let output = extract_section(&combined_output, "OUTPUT_START", "OUTPUT_END")
-                    .trim_end_matches('\n')
-                    .to_string();
-                let exit_code_str =
-                    extract_section(&combined_output, "EXITCODE_START", "EXITCODE_END")
-                        .trim()
-                        .to_string();
+                // Extract prompt for exit code
+                let prompt = &cleaned[marker_pos..];
+                let exit_code = if let Some(code_str) = prompt.strip_prefix(&self.get_marker()).and_then(|s| s.strip_suffix(':')) {
+                    code_str.trim().parse::<i64>().unwrap_or(-1)
+                } else {
+                    -1
+                };
 
-                let exit_code = exit_code_str.parse::<i64>().unwrap_or(-1);
-
-                // Store the result in trajectory
                 let result = CommandResult {
-                    output: output.clone(),
+                    output: command_output,
                     exit_code,
                 };
                 command_execution.result = Some(result.clone());
                 self.trajectory.push(command_execution);
 
-                // Clean up files
-                let clean_cmd = format!("rm {} {}", stdout_file, exitcode_file);
-
-                let CommandResult {
-                    exit_code: rm_exit_code,
-                    ..
-                } = self.exec_standalone_cmd(clean_cmd).await?;
-
-                if rm_exit_code != 0 {
-                    error!("Failed to clean up files: {}", output);
-                }
-
+                // Drain any remaining output to next prompt
                 self.drain(0.5).await?;
 
-                return Ok(result);
+                Ok(result)
             }
             _ => return Err(SandboxError::NotStarted),
         }
@@ -501,7 +444,7 @@ impl Sandbox {
         Ok(String::from_utf8_lossy(&drained).to_string())
     }
 
-    pub async fn read_until_marker(&mut self, marker: &str, timeout: f64) -> Result<()> {
+    pub async fn read_until_marker(&mut self, marker: &str, timeout: f64) -> Result<String> {
         let receiver = self
             .output_receiver
             .as_ref()
@@ -509,7 +452,7 @@ impl Sandbox {
         let mut receiver = receiver.lock().await;
         let mut accumulated = String::new();
         let start = Instant::now();
-        while !accumulated.contains(marker) {
+        while !strip_str(&accumulated).contains(marker) {
             let elapsed = start.elapsed().as_secs_f64();
             if elapsed > timeout {
                 return Err(SandboxError::TimeoutWaitingForMarker(marker.to_string()));
@@ -525,18 +468,22 @@ impl Sandbox {
                 Err(_) => return Err(SandboxError::TimeoutWaitingForMarker(marker.to_string())),
             }
         }
-        Ok(())
+        Ok(accumulated)
     }
 }
 
-// Utility function for parsing command output
-fn extract_section<'a>(text: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
-    if let Some(start_pos) = text.find(start_marker) {
-        let content_start = start_pos + start_marker.len();
-        if let Some(end_pos) = text[content_start..].find(end_marker) {
-            let content_end = content_start + end_pos;
-            return text[content_start..content_end].trim_start_matches('\n');
+fn clean_terminal_output(output: &str) -> String {
+    let stripped = strip_str(output);
+    let mut cleaned = String::new();
+    for line in stripped.lines() {
+        // Handle \r by taking the last segment after \r
+        if let Some(last_part) = line.rsplit('\r').next() {
+            cleaned.push_str(last_part);
+            cleaned.push('\n');
+        } else {
+            cleaned.push_str(line);
+            cleaned.push('\n');
         }
     }
-    ""
+    cleaned.trim_end().to_string()
 }

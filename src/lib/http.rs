@@ -13,7 +13,6 @@ use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{sync::{Mutex, Semaphore}, time::Instant};
-use uuid::Uuid;
 
 use crate::sandbox::*;
 
@@ -62,13 +61,13 @@ pub async fn create_sandbox(
     State(state): State<Arc<SoSState>>,
     Json(payload): Json<CreatePayload>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let id = Uuid::new_v4().to_string();
     let setup = if !payload.setup_commands.is_empty() {
         payload.setup_commands.join(" && ")
     } else {
         String::new()
     };
-    let sandbox = Sandbox::new(id.clone(), payload.image, setup, state.docker.clone());
+    let sandbox = Sandbox::new(payload.image, setup, state.docker.clone());
+    let id = sandbox.id.clone();
     state
         .sandboxes
         .lock()
