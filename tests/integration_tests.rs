@@ -39,12 +39,10 @@ async fn start_test_server() -> String {
 }
 
 #[tokio::test]
-async fn test_sandbox_endpoints_flow() {
+async fn test_create_sandbox() {
     let base_url = start_test_server().await;
     let client = reqwest::Client::new();
 
-    // Test 1: Create sandbox
-    println!("Testing create sandbox...");
     let create_payload = json!({
         "image": "ubuntu:latest",
         "setup_commands": ["cd /tmp", "echo 'Setting up' > /tmp/setup.txt"]
@@ -63,15 +61,35 @@ async fn test_sandbox_endpoints_flow() {
         .json()
         .await
         .expect("Failed to parse create response");
+    
     let sandbox_id = create_result["id"]
         .as_str()
-        .expect("Response should contain sandbox id")
-        .to_string();
+        .expect("Response should contain sandbox id");
     assert!(!sandbox_id.is_empty(), "Sandbox ID should not be empty");
-    println!("Created sandbox with ID: {}", sandbox_id);
+}
 
-    // Test 2: Start sandbox
-    println!("Testing start sandbox...");
+#[tokio::test]
+async fn test_start_sandbox() {
+    let base_url = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Create sandbox first
+    let create_payload = json!({
+        "image": "ubuntu:latest",
+        "setup_commands": []
+    });
+
+    let response = client
+        .post(&format!("{}/sandboxes", base_url))
+        .json(&create_payload)
+        .send()
+        .await
+        .expect("Failed to create sandbox");
+
+    let create_result: serde_json::Value = response.json().await.unwrap();
+    let sandbox_id = create_result["id"].as_str().unwrap();
+
+    // Test starting the sandbox
     let response = client
         .post(&format!("{}/sandboxes/{}/start", base_url, sandbox_id))
         .send()
@@ -79,10 +97,25 @@ async fn test_sandbox_endpoints_flow() {
         .expect("Failed to send start request");
 
     assert_eq!(response.status(), 200, "Start sandbox should return 200");
-    println!("Started sandbox successfully");
 
-    // Test 3: Execute command
-    println!("Testing execute command...");
+    // Cleanup
+    client
+        .post(&format!("{}/sandboxes/{}/stop", base_url, sandbox_id))
+        .json(&json!({ "remove": true }))
+        .send()
+        .await
+        .expect("Failed to cleanup sandbox");
+}
+
+#[tokio::test]
+async fn test_execute_command() {
+    let base_url = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Setup sandbox
+    let sandbox_id = create_and_start_sandbox(&client, &base_url).await;
+
+    // Test executing a command
     let exec_payload = json!({
         "command": "echo 'Hello, World!' && cd not-exists"
     });
@@ -100,19 +133,26 @@ async fn test_sandbox_endpoints_flow() {
         .json()
         .await
         .expect("Failed to parse exec response");
-    assert!(
-        exec_result["output"].as_str().unwrap().contains("Hello, World!"),
-        "Output should contain 'Hello, World!'"
-    );
-    assert!(
-        exec_result["output"].as_str().unwrap().contains("cd: not-exists: No such file or directory"),
-        "Output should contain 'cd: not-exists: No such file or directory'"
+    
+    assert_eq!(
+        exec_result["output"], "Hello, World!\nbash: cd: not-exists: No such file or directory",
+        "Output should contain stdout and stderr"
     );
     assert_eq!(exec_result["exit_code"], 1, "Exit code should be 1");
-    println!("Executed command successfully: {:?}", exec_result);
 
-    // Test 4: Execute comment (should be ignored)
-    println!("Testing comment command...");
+    // Cleanup
+    cleanup_sandbox(&client, &base_url, &sandbox_id).await;
+}
+
+#[tokio::test]
+async fn test_comment_commands() {
+    let base_url = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Setup sandbox
+    let sandbox_id = create_and_start_sandbox(&client, &base_url).await;
+
+    // Test executing a comment (should be ignored)
     let comment_payload = json!({
         "command": "# This is a comment"
     });
@@ -130,38 +170,55 @@ async fn test_sandbox_endpoints_flow() {
         .json()
         .await
         .expect("Failed to parse comment response");
-    assert_eq!(
-        comment_result["exit_code"], 0,
-        "Comment should return exit code 0"
-    );
-    assert_eq!(
-        comment_result["output"], "",
-        "Comment should return empty output"
-    );
-    println!("Comment command handled correctly");
+    
+    assert_eq!(comment_result["exit_code"], 0, "Comment should return exit code 0");
+    assert_eq!(comment_result["output"], "", "Comment should return empty output");
 
-    // Test 5: Make sure session is persisted
-    println!("Testing session persistence...");
-    let exec_payload = json!({
-        "command": "cd /tmp"
+    // Cleanup
+    cleanup_sandbox(&client, &base_url, &sandbox_id).await;
+}
+
+#[tokio::test]
+async fn test_session_persistence() {
+    let base_url = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Create sandbox with setup commands
+    let create_payload = json!({
+        "image": "ubuntu:latest",
+        "setup_commands": ["cd /tmp", "echo 'Setting up' > /tmp/setup.txt"]
     });
 
     let response = client
+        .post(&format!("{}/sandboxes", base_url))
+        .json(&create_payload)
+        .send()
+        .await
+        .expect("Failed to create sandbox");
+
+    let create_result: serde_json::Value = response.json().await.unwrap();
+    let sandbox_id = create_result["id"].as_str().unwrap();
+
+    // Start sandbox
+    client
+        .post(&format!("{}/sandboxes/{}/start", base_url, sandbox_id))
+        .send()
+        .await
+        .expect("Failed to start sandbox");
+
+    // Change directory in one command
+    let response = client
         .post(&format!("{}/sandboxes/{}/exec", base_url, sandbox_id))
-        .json(&exec_payload)
+        .json(&json!({ "command": "cd /tmp" }))
         .send()
         .await
         .expect("Failed to send exec request");
+    assert_eq!(response.status(), 200);
 
-    assert_eq!(response.status(), 200, "Exec command should return 200");
-
-    let exec_payload = json!({
-        "command": "cat setup.txt"
-    });
-
+    // Check if we can access the file created during setup in the current directory
     let response = client
         .post(&format!("{}/sandboxes/{}/exec", base_url, sandbox_id))
-        .json(&exec_payload)
+        .json(&json!({ "command": "cat setup.txt" }))
         .send()
         .await
         .expect("Failed to send exec request");
@@ -172,18 +229,31 @@ async fn test_sandbox_endpoints_flow() {
         .json()
         .await
         .expect("Failed to parse exec response");
-    assert_eq!(
-        exec_result["exit_code"], 0,
-        "Comment should return exit code 0"
-    );
-    assert_eq!(
-        exec_result["output"],
-        "Setting up",
-        "Stdout should be 'Setting up'"
-    );
+    
+    assert_eq!(exec_result["exit_code"], 0, "Should return exit code 0");
+    assert_eq!(exec_result["output"], "Setting up", "Should read the setup file");
 
-    // Test 6: Test standalone mode
-    println!("Testing standalone mode...");
+    // Cleanup
+    cleanup_sandbox(&client, &base_url, sandbox_id).await;
+}
+
+#[tokio::test]
+async fn test_standalone_mode() {
+    let base_url = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Setup sandbox
+    let sandbox_id = create_and_start_sandbox(&client, &base_url).await;
+
+    // First change directory
+    client
+        .post(&format!("{}/sandboxes/{}/exec", base_url, sandbox_id))
+        .json(&json!({ "command": "cd /tmp" }))
+        .send()
+        .await
+        .expect("Failed to change directory");
+
+    // Test standalone mode (should not persist session)
     let exec_payload = json!({
         "command": "pwd",
         "standalone": true
@@ -202,16 +272,25 @@ async fn test_sandbox_endpoints_flow() {
         .json()
         .await
         .expect("Failed to parse exec response");
-    assert_eq!(
-        exec_result["exit_code"], 0,
-        "Comment should return exit code 0"
-    );
-    assert_eq!(exec_result["output"], "/\n", "Stdout should be '/\n'");
+    
+    assert_eq!(exec_result["exit_code"], 0, "Should return exit code 0");
+    assert_eq!(exec_result["output"], "/\n", "Should be in root directory, not /tmp");
 
-    // Test 7: Make sure piping works
-    println!("Testing piping...");
+    // Cleanup
+    cleanup_sandbox(&client, &base_url, &sandbox_id).await;
+}
+
+#[tokio::test]
+async fn test_piping_and_redirection() {
+    let base_url = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Setup sandbox
+    let sandbox_id = create_and_start_sandbox(&client, &base_url).await;
+
+    // Test piping and redirection
     let exec_payload = json!({
-        "command": "echo \"Hello, World!!\nHow you doing?\" | grep 'Hello' > output.txt && cat output.txt"
+        "command": "echo -e \"Hello, World!!\nHow you doing?\nHello\" | grep 'Hello' > output.txt && cat output.txt"
     });
 
     let response = client
@@ -227,18 +306,26 @@ async fn test_sandbox_endpoints_flow() {
         .json()
         .await
         .expect("Failed to parse exec response");
+    
     assert_eq!(
-        exec_result["output"].as_str().unwrap().contains("Hello, World!!"),
-        true,
-        "Output should contain 'Hello, World!!'"
+        exec_result["output"], "Hello, World!!\nHello",
+        "Output should contain 'Hello, World!!' and 'Hello'"
     );
-    assert_eq!(
-        exec_result["exit_code"], 0,
-        "Piping should return exit code 0"
-    );
+    assert_eq!(exec_result["exit_code"], 0, "Piping should return exit code 0");
 
-    // Test 8: Stop sandbox
-    println!("Testing stop sandbox...");
+    // Cleanup
+    cleanup_sandbox(&client, &base_url, &sandbox_id).await;
+}
+
+#[tokio::test]
+async fn test_stop_sandbox() {
+    let base_url = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Setup sandbox
+    let sandbox_id = create_and_start_sandbox(&client, &base_url).await;
+
+    // Test stopping the sandbox
     let response = client
         .post(&format!("{}/sandboxes/{}/stop", base_url, sandbox_id))
         .json(&json!({ "remove": true }))
@@ -247,10 +334,8 @@ async fn test_sandbox_endpoints_flow() {
         .expect("Failed to send stop request");
 
     assert_eq!(response.status(), 200, "Stop sandbox should return 200");
-    println!("Stopped sandbox successfully");
 
-    // Test 9: Try to start already stopped sandbox (should fail)
-    println!("Testing start non-existent sandbox...");
+    // Test that sandbox is actually stopped by trying to start it again
     let response = client
         .post(&format!("{}/sandboxes/{}/start", base_url, sandbox_id))
         .send()
@@ -260,11 +345,43 @@ async fn test_sandbox_endpoints_flow() {
     assert_eq!(
         response.status(),
         404,
-        "Starting non-existent sandbox should return 404"
+        "Starting removed sandbox should return 404"
     );
-    println!("Correctly returned 404 for non-existent sandbox");
+}
 
-    println!("All tests passed!");
+// Helper functions to reduce code duplication
+async fn create_and_start_sandbox(client: &reqwest::Client, base_url: &str) -> String {
+    let create_payload = json!({
+        "image": "ubuntu:latest",
+        "setup_commands": []
+    });
+
+    let response = client
+        .post(&format!("{}/sandboxes", base_url))
+        .json(&create_payload)
+        .send()
+        .await
+        .expect("Failed to create sandbox");
+
+    let create_result: serde_json::Value = response.json().await.unwrap();
+    let sandbox_id = create_result["id"].as_str().unwrap().to_string();
+
+    client
+        .post(&format!("{}/sandboxes/{}/start", base_url, sandbox_id))
+        .send()
+        .await
+        .expect("Failed to start sandbox");
+
+    sandbox_id
+}
+
+async fn cleanup_sandbox(client: &reqwest::Client, base_url: &str, sandbox_id: &str) {
+    client
+        .post(&format!("{}/sandboxes/{}/stop", base_url, sandbox_id))
+        .json(&json!({ "remove": true }))
+        .send()
+        .await
+        .expect("Failed to cleanup sandbox");
 }
 
 #[tokio::test]
