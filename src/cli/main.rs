@@ -12,6 +12,8 @@ use tokio::sync::{Mutex, Semaphore};
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod tui;
+
 #[derive(Parser)]
 #[command(name = "sos")]
 #[command(about = "A CLI for managing sandboxed containers for shell agents")]
@@ -54,6 +56,12 @@ enum Commands {
         /// Setup commands to run after container start
         #[arg(long)]
         setup: Vec<String>,
+    },
+    /// Start the Terminal User Interface
+    Tui {
+        /// Server URL
+        #[arg(short, long, default_value = "http://localhost:3000")]
+        server: String,
     },
 }
 
@@ -131,6 +139,7 @@ async fn main() -> Result<()> {
             image,
             setup,
         } => session_command(server, image, setup).await,
+        Commands::Tui { server } => tui_command(server).await,
     }
 }
 
@@ -493,4 +502,9 @@ async fn session_command(server: String, image: String, setup: Vec<String>) -> R
     }
 
     Ok(())
+}
+
+async fn tui_command(server: String) -> Result<()> {
+    info!("Starting Terminal User Interface (TUI) for server: {}", server);
+    tui::run_tui(server).await
 }

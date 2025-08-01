@@ -10,6 +10,8 @@ use crossterm::{
 use ratatui::{
     prelude::*,
     widgets::*,
+    backend::CrosstermBackend,
+    Terminal,
 };
 use serde_json::Value;
 use sos::http::{CreatePayload, ExecPayload, SandboxInfo, StopPayload};
@@ -1062,8 +1064,7 @@ impl App {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+pub async fn run_tui(server_url: String) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1072,10 +1073,6 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app
-    let server_url = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "http://localhost:3000".to_string());
-    
     let mut app = App::new(server_url);
     
     // Initial data load

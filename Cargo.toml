@@ -10,12 +10,7 @@ path = "src/lib/mod.rs"
 
 [[bin]]
 name = "sos"
-path = "src/main.rs"
-
-[[bin]]
-name = "sos-tui"
-path = "src/tui.rs"
-
+path = "src/cli/main.rs"
 
 [[bench]]
 name = "sandbox_performance"
