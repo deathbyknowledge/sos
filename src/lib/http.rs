@@ -22,7 +22,7 @@ impl SandboxError {
             SandboxError::NotStarted => StatusCode::BAD_REQUEST,
             SandboxError::AlreadyStarted => StatusCode::BAD_REQUEST,
             SandboxError::SetupCommandsFailed(_) => StatusCode::BAD_REQUEST,
-            SandboxError::PullImageFailed(_) => StatusCode::BAD_REQUEST,
+            SandboxError::PullImageFailed { .. } => StatusCode::BAD_REQUEST,
             SandboxError::StopContainerFailed(_) => StatusCode::BAD_REQUEST,
             SandboxError::StartContainerFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SandboxError::ContainerWriteFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -46,6 +46,7 @@ pub struct SoSState {
 }
 
 /// POST `/sandboxes` payload.
+///
 /// Includes the container image to use and the setup commands to run
 /// on container startup. Setup commands will be chained together with `&&`.
 #[derive(Deserialize, serde::Serialize)]
@@ -55,6 +56,7 @@ pub struct CreatePayload {
 }
 
 /// POST `/sandboxes` handler.
+///
 /// Creates a new sandbox with the provided image and setup commands.
 /// Assigns a new UUID to the sandbox, and returns it. Does NOT start a container.
 pub async fn create_sandbox(
@@ -80,6 +82,7 @@ pub async fn create_sandbox(
 // Could include instructions on custom tools or w/e
 
 /// POST `/sandboxes/{id}/start` handler.
+/// 
 /// Starts a sandbox with the given ID and runs the setup commands.
 /// Acquires a permit from the semaphore, and locks the sandbox until the
 /// sandbox is stopped. If no permits are available, it blocks until one is.
@@ -114,6 +117,7 @@ pub async fn start_sandbox(
 }
 
 /// POST `/sandboxes/{id}/exec` payload.
+/// 
 /// Includes the command to execute and whether it should be run in standalone
 /// mode.
 #[derive(Deserialize, serde::Serialize)]
@@ -123,6 +127,7 @@ pub struct ExecPayload {
 }
 
 /// POST `/sandboxes/{id}/exec` handler.
+///
 /// Executes a command in the sandbox.
 /// If the command is run in standalone mode, it will be run as a new process.
 /// Otherwise, it will be run in the existing session.
@@ -166,6 +171,7 @@ pub async fn exec_cmd(
 }
 
 /// POST `/sandboxes/{id}/stop` payload.
+///
 /// Includes a flag for whether to remove the sandbox after stopping it.
 #[derive(Deserialize, serde::Serialize)]
 pub struct StopPayload {
@@ -173,6 +179,7 @@ pub struct StopPayload {
 }
 
 /// POST `/sandboxes/{id}/stop` handler.
+/// 
 /// Stops a sandbox with the given ID.
 /// If the `remove` flag is set, the sandbox will be removed from the server.
 /// Otherwise, the sandbox will be stopped and remain in the server.
@@ -208,6 +215,7 @@ pub async fn stop_sandbox(
 }
 
 /// GET `/sandboxes/{id}/trajectory` handler.
+///
 /// Returns the trajectory of the sandbox.
 /// The trajectory is a list of commands that have been executed in the sandbox.
 /// Each command has a timestamp, a command string, and a result.
@@ -258,6 +266,7 @@ pub async fn get_trajectory(
 }
 
 /// GET `/sandboxes/{id}/trajectory/formatted` handler.
+/// 
 /// Returns the trajectory of the sandbox in a formatted string.
 /// The trajectory is a list of commands that have been executed in the sandbox.
 /// Each command has a timestamp, a command string, and a result.
@@ -278,6 +287,7 @@ pub async fn get_trajectory_formatted(
 }
 
 /// GET `/sandboxes` response struct.
+///
 /// Includes the ID, image, setup commands, and status of the sandbox.
 #[derive(Serialize, Deserialize)]
 pub struct SandboxInfo {
@@ -290,6 +300,7 @@ pub struct SandboxInfo {
 }
 
 /// GET `/sandboxes` handler.
+///
 /// Returns a list of all sandboxes.
 /// Each sandbox has an ID, image, setup commands, and status.
 pub async fn list_sandboxes(

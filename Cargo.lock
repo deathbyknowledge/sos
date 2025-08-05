@@ -1989,6 +1989,7 @@ dependencies = [
  "crossterm",
  "futures",
  "ratatui",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

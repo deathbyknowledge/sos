@@ -5,15 +5,22 @@ A service to manage sandboxed containers for shell agents.
 ## Features
 
 - **Server Mode**: Run an HTTP API server for managing sandboxes
-- **Client Mode**: CLI client for interacting with sandbox servers
+- **CLI/TUI Mode**: CLI and TUI clients for interacting with sandbox servers
 - **Concurrent Sandbox Management**: Configurable concurrency control
 - **Session Persistence**: Commands executed in the same bash session
 - **Automatic Cleanup**: Containers are properly stopped and removed
 
 ## Installation
 
+### From source
 ```bash
 cargo build --release
+```
+
+### From release binary
+(Read the script before blindly installing it)
+```
+curl https://raw.githubusercontent.com/deathbyknowledge/sos/refs/heads/main/scripts/install.sh | sudo bash
 ```
 
 ## Usage
@@ -27,7 +34,7 @@ Start the sandbox server:
 sos serve
 
 # Custom port and concurrency limit
-sos serve --port 8080 --max-sandboxes 5
+sos serve --port 8080 --max-sandboxes 20
 ```
 
 ### Client Mode
@@ -76,7 +83,7 @@ sos session -i ubuntu:latest
 #### Custom Server URL
 
 ```bash
-sos sandbox --server http://remote-server:3000 create
+ sos sandbox --server http://remote-server:3000 create
 ```
 
 ## Complete Workflow Example
@@ -96,20 +103,30 @@ sos sandbox start $ID
 sos sandbox exec $ID "cd /tmp"
 sos sandbox exec $ID "echo \$PWD"  # Should output: /tmp
 sos sandbox exec $ID "echo 'Hello World' > test.txt"
-sos sandbox exec $ID "cat test.txt"
+# -s or --standalone runs the command outside the session
+sos sandbox exec -s $ID "cat /tmp/test.txt"
 
 # Clean up
 sos sandbox stop $ID
+```
+
+
+## TUI
+The client also includes a complete TUI version for easier debugging and use:
+```bash
+sos tui
 ```
 
 ## HTTP API
 
 When running in server mode, the following endpoints are available:
 
+- `GET /sandboxes` - List all existing sandboxes
 - `POST /sandboxes` - Create a new sandbox
+- `GET /sandboxes/{id}/trajectory` - Get the session trajectory
 - `POST /sandboxes/{id}/start` - Start a sandbox
 - `POST /sandboxes/{id}/exec` - Execute a command in a sandbox
-- `DELETE /sandboxes/{id}` - Stop and remove a sandbox
+- `POST /sandboxes/{id}/stop` - Stop and remove a sandbox
 
 ## Testing
 

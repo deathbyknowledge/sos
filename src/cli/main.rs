@@ -172,12 +172,10 @@ async fn serve_command(port: u16, max_sandboxes: usize, timeout: u64) -> Result<
 
             for (id, sandbox_arc) in sandboxes.iter() {
                 let sandbox = sandbox_arc.lock().await;
-                if let SandboxStatus::Started(_) = sandbox.get_status() {
-                    if let Some(start_time) = sandbox.start_time {
-                        if start_time.elapsed() > timeout_duration {
-                            warn!(sandbox_id = %id, elapsed_seconds = start_time.elapsed().as_secs(), "Sandbox timed out, removing");
-                            sandboxes_to_remove.push(id.clone());
-                        }
+                if let Some(start_time) = sandbox.start_time {
+                    if start_time.elapsed() > timeout_duration {
+                        warn!(sandbox_id = %id, elapsed_seconds = start_time.elapsed().as_secs(), "Sandbox timed out, removing");
+                        sandboxes_to_remove.push(id.clone());
                     }
                 }
             }
@@ -505,6 +503,5 @@ async fn session_command(server: String, image: String, setup: Vec<String>) -> R
 }
 
 async fn tui_command(server: String) -> Result<()> {
-    info!("Starting Terminal User Interface (TUI) for server: {}", server);
     tui::run_tui(server).await
 }

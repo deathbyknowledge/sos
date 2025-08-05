@@ -2,7 +2,6 @@
 name = "sos"
 version = "0.0.4"
 edition = "2024"
-default-run = "sos"
 
 [lib]
 name = "sos"
@@ -34,6 +33,7 @@ crossterm = "0.28"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 strip-ansi-escapes = "0.2.0"
+regex = "1.11.1"
 
 [dev-dependencies]
 tokio-test = "0.4"
