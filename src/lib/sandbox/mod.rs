@@ -2,7 +2,7 @@ mod io;
 mod shell;
 pub mod types;
 
-use std::{pin::Pin, sync::Arc};
+use std::{pin::Pin, sync::Arc, time::Duration};
 pub use types::{
     CommandExecution, CommandResult, Error as SandboxError, Result, Status as SandboxStatus,
 };
@@ -141,10 +141,14 @@ impl Sandbox {
     }
 
     async fn create_and_start_container(&mut self) -> Result<String> {
-        use bollard::query_parameters::{CreateContainerOptions, StartContainerOptions};
+        use bollard::query_parameters::{
+            CreateContainerOptions, InspectContainerOptions, LogsOptions, StartContainerOptions,
+        };
+        use bollard::secret::ContainerStateStatusEnum;
+
         let config = bollard::models::ContainerCreateBody {
             image: Some(self.image.clone()),
-            cmd: Some(vec!["/bin/bash".to_string(), "-i".to_string()]),
+            cmd: Some(shell::init_cmd()),
             tty: Some(true),
             open_stdin: Some(true),
             attach_stdin: Some(true),
@@ -157,14 +161,90 @@ impl Sandbox {
             .docker
             .create_container(None::<CreateContainerOptions>, config)
             .await
-            .map_err(|e| SandboxError::StartContainerFailed(e.to_string()))?;
+            .map_err(|e| SandboxError::StartContainerFailed {
+                message: e.to_string(),
+                exit_code: None,
+                logs: String::new(),
+            })?;
 
         self.status = SandboxStatus::Started(create_response.id.clone());
 
         self.docker
             .start_container(&create_response.id, None::<StartContainerOptions>)
             .await
-            .map_err(|e| SandboxError::StartContainerFailed(e.to_string()))?;
+            .map_err(|e| SandboxError::StartContainerFailed {
+                message: e.to_string(),
+                exit_code: None,
+                logs: String::new(),
+            })?;
+        let mut attempts = 0;
+        let max_attempts = 6; // ~3 seconds at 500ms intervals
+        let container_id = create_response.id.clone();
+        loop {
+            let inspect = self
+                .docker
+                .inspect_container(&container_id, None::<InspectContainerOptions>)
+                .await
+                .map_err(|e| SandboxError::StartContainerFailed {
+                    message: format!("Failed to inspect container: {}", e),
+                    exit_code: None,
+                    logs: String::new(),
+                })?;
+
+            if inspect.state.as_ref().and_then(|s| s.running) == Some(true) {
+                break; // Success
+            }
+
+            if attempts >= max_attempts {
+                // Fetch logs for diagnostics
+                let mut log_stream = self.docker.logs(
+                    &container_id,
+                    Some(LogsOptions {
+                        stdout: true,
+                        stderr: true,
+                        tail: "all".to_string(),
+                        ..Default::default()
+                    }),
+                );
+
+                let mut logs = String::new();
+                while let Some(item) = log_stream.next().await {
+                    match item.map_err(|e| SandboxError::ContainerReadFailed(e.to_string()))? {
+                        LogOutput::StdOut { message } => logs += &String::from_utf8_lossy(&message),
+                        LogOutput::StdErr { message } => logs += &String::from_utf8_lossy(&message),
+                        _ => {}
+                    }
+                }
+
+                let exit_code = inspect.state.clone().and_then(|s| s.exit_code);
+                let error_msg = inspect
+                    .state
+                    .clone()
+                    .and_then(|s| s.error.clone())
+                    .unwrap_or_default();
+                let status = inspect
+                    .state
+                    .and_then(|s| s.status.clone())
+                    .unwrap_or(ContainerStateStatusEnum::EMPTY);
+
+                error!(
+                    "Container {} failed to start. Status: {}, Exit code: {:?}, Error: {}, Logs: {}",
+                    container_id, status, exit_code, error_msg, logs
+                );
+
+                return Err(SandboxError::StartContainerFailed {
+                    message: format!(
+                        "Container exited immediately. Status: {}, Error: {}",
+                        status, error_msg
+                    ),
+                    exit_code,
+                    logs,
+                });
+            }
+
+            attempts += 1;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
 
         Ok(create_response.id)
     }
@@ -206,7 +286,11 @@ impl Sandbox {
             .docker
             .attach_container(&container_id.clone(), Some(attach_options))
             .await
-            .map_err(|e| SandboxError::StartContainerFailed(e.to_string()))?;
+            .map_err(|e| SandboxError::StartContainerFailed {
+                message: e.to_string(),
+                exit_code: None,
+                logs: String::new(),
+            })?;
 
         let mut output_stream = attach_res.output;
         let input = attach_res.input;
@@ -233,7 +317,7 @@ impl Sandbox {
         {
             let mut input_guard = self.input.as_ref().unwrap().lock().await;
             input_guard
-                .write_all(shell::init_cmd(&self.get_marker()).as_bytes())
+                .write_all(shell::conf_cmd(&self.get_marker()).as_bytes())
                 .await
                 .map_err(|e| SandboxError::ContainerWriteFailed(e.to_string()))?;
         }

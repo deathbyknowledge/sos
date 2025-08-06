@@ -13,11 +13,18 @@ pub enum Error {
     #[error("Setup commands failed: {0}")]
     SetupCommandsFailed(String),
     #[error("Failed to pull image")]
-    PullImageFailed { #[from] source: bollard::errors::Error },
+    PullImageFailed {
+        #[from]
+        source: bollard::errors::Error,
+    },
     #[error("Failed to stop container: {0}")]
     StopContainerFailed(String),
-    #[error("Failed to start container {0}")]
-    StartContainerFailed(String),
+    #[error("Failed to start container: {message}. Exit code: {exit_code:?}, Logs: {logs}")]
+    StartContainerFailed {
+        message: String,
+        exit_code: Option<i64>,
+        logs: String,
+    },
     #[error("Container write failed")]
     ContainerWriteFailed(String),
     #[error("Container read failed: {0}")]

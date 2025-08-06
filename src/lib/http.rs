@@ -12,9 +12,18 @@ use bollard::Docker;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::{sync::{Mutex, Semaphore}, time::Instant};
+use tokio::{
+    sync::{Mutex, Semaphore},
+    time::Instant,
+};
 
 use crate::sandbox::*;
+
+impl From<SandboxError> for (StatusCode, String) {
+    fn from(err: SandboxError) -> Self {
+        (err.to_status_code(), err.to_string())
+    }
+}
 
 impl SandboxError {
     fn to_status_code(&self) -> StatusCode {
@@ -24,7 +33,7 @@ impl SandboxError {
             SandboxError::SetupCommandsFailed(_) => StatusCode::BAD_REQUEST,
             SandboxError::PullImageFailed { .. } => StatusCode::BAD_REQUEST,
             SandboxError::StopContainerFailed(_) => StatusCode::BAD_REQUEST,
-            SandboxError::StartContainerFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SandboxError::StartContainerFailed { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             SandboxError::ContainerWriteFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SandboxError::ContainerReadFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SandboxError::ExecFailed(_, _) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -33,8 +42,6 @@ impl SandboxError {
         }
     }
 }
-
-
 
 /// Shared state for the SoS server.
 /// Includes the docker client, the sandboxes map, and the semaphore.
@@ -82,7 +89,7 @@ pub async fn create_sandbox(
 // Could include instructions on custom tools or w/e
 
 /// POST `/sandboxes/{id}/start` handler.
-/// 
+///
 /// Starts a sandbox with the given ID and runs the setup commands.
 /// Acquires a permit from the semaphore, and locks the sandbox until the
 /// sandbox is stopped. If no permits are available, it blocks until one is.
@@ -108,16 +115,13 @@ pub async fn start_sandbox(
     // Now lock the individual sandbox and do long work
     let mut sandbox_guard = sandbox_arc.lock().await;
 
-    sandbox_guard
-        .start(permit)
-        .await
-        .map_err(|e| (e.to_status_code(), e.to_string()))?;
+    sandbox_guard.start(permit).await?;
 
     Ok(())
 }
 
 /// POST `/sandboxes/{id}/exec` payload.
-/// 
+///
 /// Includes the command to execute and whether it should be run in standalone
 /// mode.
 #[derive(Deserialize, serde::Serialize)]
@@ -150,18 +154,9 @@ pub async fn exec_cmd(
     let mut sandbox_guard = sandbox_arc.lock().await;
     let standalone = payload.standalone.unwrap_or(false);
 
-    let CommandResult {
-        output,
-        exit_code,
-    } = match standalone {
-        true => sandbox_guard
-            .exec_standalone_cmd(command)
-            .await
-            .map_err(|e| (e.to_status_code(), e.to_string()))?,
-        false => sandbox_guard
-            .exec_session_cmd(command)
-            .await
-            .map_err(|e| (e.to_status_code(), e.to_string()))?,
+    let CommandResult { output, exit_code } = match standalone {
+        true => sandbox_guard.exec_standalone_cmd(command).await?,
+        false => sandbox_guard.exec_session_cmd(command).await?,
     };
 
     Ok(Json(serde_json::json!({
@@ -179,7 +174,7 @@ pub struct StopPayload {
 }
 
 /// POST `/sandboxes/{id}/stop` handler.
-/// 
+///
 /// Stops a sandbox with the given ID.
 /// If the `remove` flag is set, the sandbox will be removed from the server.
 /// Otherwise, the sandbox will be stopped and remain in the server.
@@ -191,25 +186,15 @@ pub async fn stop_sandbox(
     let sandbox_arc = {
         let remove = payload.remove.unwrap_or(false);
         let mut sandboxes = state.sandboxes.lock().await;
-        if remove {
-            sandboxes
-                .remove(&id)
-                .ok_or((StatusCode::NOT_FOUND, format!("Sandbox {} not found", id)))?
-        } else {
-            sandboxes
-                .get(&id)
-                .cloned()
-                .ok_or((StatusCode::NOT_FOUND, format!("Sandbox {} not found", id)))?
-        }
+        let opt = match remove {
+            true => sandboxes.remove(&id),
+            false => sandboxes.get(&id).cloned(),
+        };
+        opt.ok_or((StatusCode::NOT_FOUND, format!("Sandbox {} not found", id)))?
     };
 
     // Permit is released here
-    sandbox_arc
-        .lock()
-        .await
-        .stop()
-        .await
-        .map_err(|e| (e.to_status_code(), e.to_string()))?;
+    sandbox_arc.lock().await.stop().await?;
 
     Ok(())
 }
@@ -266,7 +251,7 @@ pub async fn get_trajectory(
 }
 
 /// GET `/sandboxes/{id}/trajectory/formatted` handler.
-/// 
+///
 /// Returns the trajectory of the sandbox in a formatted string.
 /// The trajectory is a list of commands that have been executed in the sandbox.
 /// Each command has a timestamp, a command string, and a result.

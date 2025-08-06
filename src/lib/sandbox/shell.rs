@@ -19,7 +19,7 @@ const READONLY_PROMPTS: &str = "readonly PS1; readonly PS2";
 const EXIT_COMMAND: &str = "exit() { return 0; }; export -f exit";
 
 /// Builds the command to configure the shell.
-pub fn init_cmd(marker: &str) -> String {
+pub fn conf_cmd(marker: &str) -> String {
     let prompt = &PROMPT.replace("{MARKER}", marker);
     let init_cmds = vec![
         SILENCE_INPUT,
@@ -36,4 +36,7 @@ pub fn init_cmd(marker: &str) -> String {
 // TODO: support any POSIX shell
 pub fn standalone_cmd(cmd: &str) -> Vec<String> {
     vec!["/bin/bash".to_string(), "-c".to_string(), cmd.to_string()]
+}
+pub fn init_cmd() -> Vec<String> {
+    vec!["/bin/bash".to_string(), "-i".to_string()]
 }
