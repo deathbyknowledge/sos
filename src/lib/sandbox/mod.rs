@@ -19,18 +19,28 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tokio::{io::AsyncWriteExt, sync::OwnedSemaphorePermit};
 use tracing::error;
-
 pub struct Sandbox {
+    /// UUID for the sandbox
     pub id: String,
+    /// Docker image to use for the sandbox container
     pub image: String,
+    /// Commands to run on startup
     pub setup_commands: String,
+    /// Instant when the sandbox and container were started
     pub start_time: Option<Instant>,
+    /// Current status of the sandbox
     status: SandboxStatus,
+    /// Semaphore permit for the sandbox. Used to limit the number of concurrent sandboxes.
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    /// Input stream for the sandbox (stdin)
     input: Option<Mutex<Pin<Box<dyn tokio::io::AsyncWrite + Send>>>>,
+    /// Output stream for the sandbox (stdout/stderr)
     output_receiver: Option<Mutex<UnboundedReceiver<Bytes>>>,
+    /// Docker client
     docker: Arc<Docker>,
+    /// Trajectory of commands executed in the sandbox
     trajectory: Vec<CommandExecution>,
+    /// Last standalone command exit code
     last_standalone_exit_code: Option<i64>,
 }
 
@@ -38,8 +48,10 @@ impl Sandbox {
     pub fn new(image: String, setup_commands: String, docker: Arc<Docker>) -> Self {
         use uuid::Uuid;
 
+        let id = Uuid::new_v4().to_string();
+
         Sandbox {
-            id: Uuid::new_v4().to_string(),
+            id,
             image,
             setup_commands,
             docker,
@@ -51,12 +63,6 @@ impl Sandbox {
             trajectory: Vec::new(),
             last_standalone_exit_code: None,
         }
-    }
-
-    // We use PS1 to track the end of command outputs AND their exit codes.
-    // To make jailbreaking harder, we use the sandbox UUID as the PS1 marker.
-    fn get_marker(&self) -> String {
-        format!("#{}#:", self.id.clone())
     }
 
     pub fn get_status(&self) -> &SandboxStatus {
@@ -148,7 +154,7 @@ impl Sandbox {
 
         let config = bollard::models::ContainerCreateBody {
             image: Some(self.image.clone()),
-            cmd: Some(shell::init_cmd()),
+            cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
             tty: Some(true),
             open_stdin: Some(true),
             attach_stdin: Some(true),
@@ -266,39 +272,52 @@ impl Sandbox {
     }
 
     async fn attach_and_configure_shell(&mut self) -> Result<()> {
-        use bollard::query_parameters::AttachContainerOptions;
-
         let container_id = match &self.status {
             SandboxStatus::Started(cid) => cid,
             _ => return Err(SandboxError::NotStarted),
         };
 
-        let attach_options = AttachContainerOptions {
-            stdin: true,
-            stdout: true,
-            stderr: true,
-            stream: true,
-            logs: false,
-            detach_keys: None,
-        };
-
-        let attach_res = self
+        let create_exec_res = self
             .docker
-            .attach_container(&container_id.clone(), Some(attach_options))
-            .await
-            .map_err(|e| SandboxError::StartContainerFailed {
-                message: e.to_string(),
-                exit_code: None,
-                logs: String::new(),
-            })?;
+            .create_exec(
+                container_id,
+                CreateExecOptions {
+                    cmd: Some(shell::init_cmd()),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    attach_stdin: Some(true),
+                    tty: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await?;
 
-        let mut output_stream = attach_res.output;
-        let input = attach_res.input;
+        let start_exec_res = self
+            .docker
+            .start_exec(
+                &create_exec_res.id,
+                Some(StartExecOptions {
+                    detach: false,
+                    tty: true,
+                    ..Default::default()
+                }),
+            )
+            .await?;
+        let (mut output, input) = match start_exec_res {
+            StartExecResults::Attached { output, input, .. } => (output, input),
+            _ => {
+                return Err(SandboxError::StartContainerFailed {
+                    message: "Failed to start exec, didn't attach.".to_string(),
+                    exit_code: None,
+                    logs: String::new(),
+                });
+            }
+        };
 
         // Spawn a task to forward the output stream to the channel
         let (tx, rx) = futures::channel::mpsc::unbounded::<Bytes>();
         tokio::spawn(async move {
-            while let Some(res) = output_stream.next().await {
+            while let Some(res) = output.next().await {
                 if let Ok(chunk) = res {
                     let bytes = match chunk {
                         LogOutput::Console { message } => message,
@@ -314,16 +333,10 @@ impl Sandbox {
         self.input = Some(Mutex::new(input));
         self.output_receiver = Some(Mutex::new(rx));
 
-        {
-            let mut input_guard = self.input.as_ref().unwrap().lock().await;
-            input_guard
-                .write_all(shell::conf_cmd(&self.get_marker()).as_bytes())
-                .await
-                .map_err(|e| SandboxError::ContainerWriteFailed(e.to_string()))?;
-        }
+        self.write_cmd(shell::CONF_CMD.to_string()).await?;
 
-        self.drain(0.5).await?;
-
+        // self.drain(0.5).await?;
+        let _ = self.read_until_idle_after_marker(2.0, 0.1, 1).await?;
         Ok(())
     }
 
@@ -338,53 +351,41 @@ impl Sandbox {
                 };
 
                 // Write raw command
+                self.write_cmd(format!("{}\n", &cmd)).await?;
+
+                // Hint how many commands were executed by counting the number of newlines present.
+                // Might not be an exact match but it allows us to cut the timeout short.
+                let n_commands_hint = cmd.split('\n').count();
+                let output = match self
+                    .read_until_idle_after_marker(2.0, 0.1, n_commands_hint)
+                    .await
                 {
-                    let mut input = self
-                        .input
-                        .as_ref()
-                        .ok_or(SandboxError::NotStarted)?
-                        .lock()
-                        .await;
-                    input
-                        .write_all(format!("{}\n", cmd).as_bytes())
-                        .await
-                        .map_err(|e| {
-                            error!("Error writing to container: {}", e);
-                            SandboxError::ContainerWriteFailed(e.to_string())
-                        })?;
-                }
-
-                // Read until prompt marker
-                let output_raw = self.read_until_idle_after_marker(5.0, 0.5).await?;
-
-                // Clean the output
-                let cleaned = io::clean_terminal_output(&output_raw);
-
-                // Use regex to find all markers, remove them, and get last exit code
-                let marker_pattern = format!(r"{}(\d+):", regex::escape(&self.get_marker()));
-                let marker_regex = regex::Regex::new(&marker_pattern)
-                    .map_err(|e| SandboxError::ContainerReadFailed(e.to_string()))?;
-
-                let mut last_exit_code = -1i64;
-                let mut matches = marker_regex.captures_iter(&cleaned);
-                while let Some(cap) = matches.next() {
-                    if let Some(code_str) = cap.get(1) {
-                        last_exit_code = code_str.as_str().parse::<i64>().unwrap_or(-1);
+                    Ok(s) => s,
+                    Err(SandboxError::TimeoutWaitingForMarker(_)) => {
+                        // Step 1: try a newline to complete open constructs
+                        self.write_cmd("\n".to_string()).await?;
+                        match self.read_until_idle_after_marker(2.0, 0.2, 1).await {
+                            Ok(s2) => s2,
+                            Err(SandboxError::TimeoutWaitingForMarker(_)) => {
+                                // Step 2: try Ctrl-D (safe due to 'set -o ignoreeof')
+                                self.write_cmd("\x04".to_string()).await?;
+                                // Final attempt to reach PS1
+                                self.read_until_idle_after_marker(2.0, 0.2, 1).await?
+                            }
+                            Err(e) => return Err(e),
+                        }
                     }
-                }
-
-                let cleaned_output = marker_regex.replace_all(&cleaned, "").to_string();
-                let command_output = cleaned_output.trim_end().to_string();
-
-                let result = CommandResult {
-                    output: command_output,
-                    exit_code: last_exit_code,
+                    Err(e) => return Err(e),
                 };
+
+                // Find all markers, remove them, and get last exit code (if input included multiple commands)
+                let (output, exit_code) = io::strip_markers_and_extract_exit_code(&output);
+
+                let result = CommandResult { output, exit_code };
                 command_execution.result = Some(result.clone());
                 self.trajectory.push(command_execution);
 
                 // Drain any remaining output to next prompt
-                self.drain(0.5).await?;
 
                 Ok(result)
             }
@@ -447,7 +448,7 @@ impl Sandbox {
         self.permit.take();
 
         return match &self.status {
-            SandboxStatus::Stopped(_) => Ok(()), // Already stopped
+            SandboxStatus::Stopped(_) => Err(SandboxError::NotStarted), // Already stopped
             SandboxStatus::Created => Err(SandboxError::NotStarted),
             SandboxStatus::Started(cid) => {
                 // Stop the container but don't remove it
@@ -470,32 +471,51 @@ impl Sandbox {
         };
     }
 
-    pub async fn drain(&mut self, timeout: f64) -> Result<String> {
-        let receiver = self
-            .output_receiver
+    async fn write_cmd(&mut self, cmd: String) -> Result<()> {
+        let mut input = self
+            .input
             .as_ref()
-            .ok_or(SandboxError::NotStarted)?;
-        let mut receiver_guard = receiver.lock().await;
-        let drained = io::drain(&mut receiver_guard, timeout).await;
-        drained.map_err(|e| SandboxError::ContainerReadFailed(e.to_string()))
+            .ok_or(SandboxError::NotStarted)?
+            .lock()
+            .await;
+        input
+            .write_all(cmd.as_bytes())
+            .await
+            .map_err(|e| SandboxError::ContainerWriteFailed(e.to_string()))?;
+        input
+            .flush()
+            .await
+            .map_err(|e| SandboxError::ContainerWriteFailed(e.to_string()))?;
+        Ok(())
     }
 
-    pub async fn read_until_idle_after_marker(
+    async fn read_until_idle_after_marker(
         &mut self,
         overall_timeout: f64,
         idle_timeout: f64,
+        short_circuit_after_n_markers: usize,
     ) -> Result<String> {
         let receiver = self
             .output_receiver
             .as_ref()
             .ok_or(SandboxError::NotStarted)?;
         let mut receiver_guard = receiver.lock().await;
-        let marker = self.get_marker();
 
-        let result =
-            io::read_stream_until_idle(&mut receiver_guard, &marker, overall_timeout, idle_timeout)
-                .await;
-
-        result.map_err(|e| SandboxError::ContainerReadFailed(e.to_string()))
+        let result = io::read_stream_until_idle(
+            &mut receiver_guard,
+            overall_timeout,
+            idle_timeout,
+            short_circuit_after_n_markers,
+        )
+        .await;
+        match result {
+            Ok(s) => Ok(s),
+            Err(io::ReadError::OverallTimeout) => Err(SandboxError::TimeoutWaitingForMarker(
+                "Marker not seen before timeout (possible incomplete input)".to_string(),
+            )),
+            Err(io::ReadError::StreamClosed) => Err(SandboxError::ContainerReadFailed(
+                "Stream closed unexpectedly".to_string(),
+            )),
+        }
     }
 }

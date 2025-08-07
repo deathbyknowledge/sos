@@ -1,37 +1,46 @@
-// Disables stdin from being echoed back to the terminal.
-const SILENCE_INPUT: &str = "stty -echo";
+use const_format::{concatcp, formatcp};
+
+// Change this
+pub const UNIQUE_MARKER: &str = "TR0N-F1GHTS-4-TH3-U23R2";
+pub const PS1_MARKER: &str = formatcp!("#PS1-{}#:", UNIQUE_MARKER);
+pub const PS2_MARKER: &str = formatcp!("#PS2-{}#:", UNIQUE_MARKER);
+const PS1: &str = formatcp!("{}$?:", PS1_MARKER); // Also includes the exit code
+const PS2: &str = formatcp!("{}", PS2_MARKER);
+
+// Disables stdin from being echoe back to the terminal.
+const SILENCE_INPUT: &str = "stty -echo; ";
 
 // Disables bracketed paste mode which adds a lot of noise to the output.
-const DISABLE_BRACKETED_PASTE: &str = "bind 'set enable-bracketed-paste off'";
+const DISABLE_BRACKETED_PASTE: &str = "bind 'set enable-bracketed-paste off'; ";
 
 // Sets the prompt to include the exit code of the last standalone command.
-const PROMPT: &str = "PS1='{MARKER}$?:'";
+const SET_PS1: &str = formatcp!("PS1='{}'; ", PS1);
 
 // Disables the input prompt, should never be used anyway but just in case.
-const PROMPT_2: &str = "PS2=''";
+const SET_PS2: &str = formatcp!("PS2='{}'; ", PS2);
 
 // Since we use the prompts to detect when commands finish, we need to make sure they are not overwritten
-// to avoid jailbreaks in the simulation.
-const READONLY_PROMPTS: &str = "readonly PS1; readonly PS2";
+// to avoid jailbreaks in the simulation. Agent can still echo the prompts though.
+const READONLY_PROMPTS: &str = "readonly PS1; readonly PS2; ";
 
 // Overrides the default exit command to not exit the shell.
 // TODO: echo special marker on exit to terminate the session.
-const EXIT_COMMAND: &str = "exit() { return 0; }; export -f exit";
+const EXIT_COMMAND: &str = "exit() { return 0; }; export -f exit; ";
+
+// Ignore EOF to prevent the shell from exiting when the input stream is closed.
+const IGNORE_EOF: &str = "set -o ignoreeof; ";
 
 /// Builds the command to configure the shell.
-pub fn conf_cmd(marker: &str) -> String {
-    let prompt = &PROMPT.replace("{MARKER}", marker);
-    let init_cmds = vec![
-        SILENCE_INPUT,
-        DISABLE_BRACKETED_PASTE,
-        prompt,
-        PROMPT_2,
-        READONLY_PROMPTS,
-        EXIT_COMMAND,
-    ];
-
-    format!("{}\n", init_cmds.join("; "))
-}
+pub const CONF_CMD: &str = concatcp!(
+    SILENCE_INPUT,
+    DISABLE_BRACKETED_PASTE,
+    SET_PS1,
+    SET_PS2,
+    READONLY_PROMPTS,
+    EXIT_COMMAND,
+    IGNORE_EOF,
+    "\n"
+);
 
 // TODO: support any POSIX shell
 pub fn standalone_cmd(cmd: &str) -> Vec<String> {
