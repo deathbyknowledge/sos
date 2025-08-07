@@ -82,7 +82,7 @@ async fn execute_command(
     let mut exec_payload = json!({
         "command": command
     });
-    
+
     if let Some(standalone_value) = standalone {
         exec_payload["standalone"] = json!(standalone_value);
     }
@@ -94,7 +94,13 @@ async fn execute_command(
         .await
         .expect("Failed to send exec request");
 
-    assert_eq!(response.status(), 200, "Exec command should return 200");
+    let status = response.status().clone();
+    assert_eq!(
+        status,
+        200,
+        "{}",
+        response.text().await.unwrap()
+    );
 
     response
         .json()
@@ -180,7 +186,14 @@ async fn test_execute_command() {
     let sandbox_id = create_and_start_sandbox(&client, &base_url).await;
 
     // Test executing a command
-    let exec_result = execute_command(&client, &base_url, &sandbox_id, "echo 'Hello, World!' && cd not-exists", None).await;
+    let exec_result = execute_command(
+        &client,
+        &base_url,
+        &sandbox_id,
+        "echo 'Hello, World!' && cd not-exists",
+        None,
+    )
+    .await;
 
     assert_eq!(
         exec_result["output"], "Hello, World!\nbash: cd: not-exists: No such file or directory",
@@ -201,7 +214,8 @@ async fn test_comment_commands() {
     let sandbox_id = create_and_start_sandbox(&client, &base_url).await;
 
     // Test executing a comment (should be ignored)
-    let comment_result = execute_command(&client, &base_url, &sandbox_id, "# This is a comment", None).await;
+    let comment_result =
+        execute_command(&client, &base_url, &sandbox_id, "# This is a comment", None).await;
 
     assert_eq!(
         comment_result["exit_code"], 0,
@@ -304,6 +318,16 @@ async fn test_piping_and_redirection() {
         "Piping should return exit code 0"
     );
 
+    let exec_result = execute_command(&client, &base_url, &sandbox_id, "echo 'Q0xVIFdBUyBIRVJF' | base64 -d ", None).await;
+    assert_eq!(
+        exec_result["output"], "CLU WAS HERE",
+        "Output should contain 'CLU WAS HERE'"
+    );
+    assert_eq!(
+        exec_result["exit_code"], 0,
+        "Piping should return exit code 0"
+    );
+
     // Cleanup
     cleanup_sandbox(&client, &base_url, &sandbox_id).await;
 }
@@ -339,7 +363,6 @@ async fn test_stop_sandbox() {
         "Starting removed sandbox should return 404"
     );
 }
-
 
 #[tokio::test]
 async fn test_error_conditions() {
@@ -455,9 +478,13 @@ async fn test_multiline_commands() {
 
     // Test multi-line command with literal newlines
     let multiline_command = "echo 'First line'\necho 'Second line'\necho 'Third line'";
-    let exec_result = execute_command(&client, &base_url, &sandbox_id, multiline_command, None).await;
+    let exec_result =
+        execute_command(&client, &base_url, &sandbox_id, multiline_command, None).await;
 
-    assert_eq!(exec_result["exit_code"], 0, "Multi-line command should succeed");
+    assert_eq!(
+        exec_result["exit_code"], 0,
+        "Multi-line command should succeed"
+    );
     assert_eq!(
         exec_result["output"], "First line\nSecond line\nThird line",
         "Output should contain all three lines"
@@ -465,7 +492,8 @@ async fn test_multiline_commands() {
 
     // Test multi-line command with variable assignment and usage
     let script_command = "NAME='World'\necho \"Hello, $NAME!\"\necho \"Goodbye, $NAME!\"";
-    let script_result = execute_command(&client, &base_url, &sandbox_id, script_command, None).await;
+    let script_result =
+        execute_command(&client, &base_url, &sandbox_id, script_command, None).await;
 
     assert_eq!(script_result["exit_code"], 0, "Script should succeed");
     assert_eq!(
@@ -474,10 +502,15 @@ async fn test_multiline_commands() {
     );
 
     // Test multi-line command with conditional logic
-    let conditional_command = "if [ 1 -eq 1 ]; then\n  echo 'Condition is true'\nelse\n  echo 'Condition is false'\nfi";
-    let conditional_result = execute_command(&client, &base_url, &sandbox_id, conditional_command, None).await;
+    let conditional_command =
+        "if [ 1 -eq 1 ]; then\n  echo 'Condition is true'\nelse\n  echo 'Condition is false'\nfi";
+    let conditional_result =
+        execute_command(&client, &base_url, &sandbox_id, conditional_command, None).await;
 
-    assert_eq!(conditional_result["exit_code"], 0, "Conditional should succeed");
+    assert_eq!(
+        conditional_result["exit_code"], 0,
+        "Conditional should succeed"
+    );
     assert_eq!(
         conditional_result["output"], "Condition is true",
         "Conditional output should show correct branch"

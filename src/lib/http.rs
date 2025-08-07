@@ -38,7 +38,7 @@ impl SandboxError {
             SandboxError::ContainerReadFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SandboxError::ExecFailed(_, _) => StatusCode::INTERNAL_SERVER_ERROR,
             SandboxError::CreateExecFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            SandboxError::TimeoutWaitingForMarker(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SandboxError::TimeoutWaitingForMarker(_) => StatusCode::GATEWAY_TIMEOUT,
         }
     }
 }
