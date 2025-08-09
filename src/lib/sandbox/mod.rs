@@ -335,7 +335,6 @@ impl Sandbox {
 
         self.write_cmd(shell::CONF_CMD.to_string()).await?;
 
-        // self.drain(0.5).await?;
         let _ = self.read_until_idle_after_marker(2.0, 0.1, 1).await?;
         Ok(())
     }
@@ -357,7 +356,7 @@ impl Sandbox {
                 // Might not be an exact match but it allows us to cut the timeout short.
                 let n_commands_hint = cmd.split('\n').count();
                 let output = match self
-                    .read_until_idle_after_marker(2.0, 0.1, n_commands_hint)
+                    .read_until_idle_after_marker(2.0, 0.2, n_commands_hint)
                     .await
                 {
                     Ok(s) => s,

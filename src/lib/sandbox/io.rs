@@ -23,6 +23,7 @@ pub async fn read_stream_until_idle(
     let start = Instant::now();
 
     let mut markers_seen = 0;
+    let mut last_count = 0;
     loop {
         if start.elapsed().as_secs_f64() > overall_timeout {
             return Err(ReadError::OverallTimeout);
@@ -36,8 +37,10 @@ pub async fn read_stream_until_idle(
                 // split across multiple chunks. This normally happens if the command was multiline. To avoid
                 // having to rely on the idle timeout only to check for markers, we use the number of newlines
                 // in the input command as a hint to how many ouputs we should expect.
-                if OUTPUT_MARKER_REGEX.is_match(&accumulated) {
-                    markers_seen += 1;
+                let current_count = OUTPUT_MARKER_REGEX.find_iter(&accumulated).count();
+                if current_count > last_count {
+                    markers_seen += current_count - last_count; // More than one marker per chunk is possible
+                    last_count = current_count;
                     if markers_seen >= short_circuit_after_n_markers {
                         break;
                     }
