@@ -28,8 +28,8 @@ class ShellTrajectory(art.Trajectory):
 
 
 async def rollout(model: art.Model, scenario: Scenario) -> ShellTrajectory:
-  client = model.openai_client() if LOCAL else oai
-  sandbox_id = await sos.create_sandbox(image="shellm-sandbox:latest", setup_commands=scenario.setup_commands)
+  client = model.openai_client()
+  sandbox_id = await sos.create_sandbox(image="deathbyknowledge/shellm-sandbox:latest", setup_commands=scenario.setup_commands)
   traj = ShellTrajectory(
     reward=0.0,
     messages_and_choices=[],
@@ -65,15 +65,19 @@ async def rollout(model: art.Model, scenario: Scenario) -> ShellTrajectory:
       response = await client.chat.completions.create(
         messages=traj.messages(),
         model=model.name,
-        temperature=0.7,
-        top_p=0.95,
+        # temperature=0.7,
+        # top_p=0.95,
         max_tokens=512,
-        frequency_penalty=0.3,
-        presence_penalty=0.1,
+        # frequency_penalty=0.3,
+        # presence_penalty=0.1,
       )
 
       if not response.choices[0].message.content or response.choices[0].message.content is None:
         raise Exception("No response from model")
+    
+      if response.usage.completion_tokens == 512:
+        traj.corrupted = True
+        response.choices[0].message.content = "exit 0"
 
       return response.choices[0]
     

@@ -8,7 +8,7 @@ from benchmark import benchmark
 
 
 async def train(model: art.TrainableModel[RunConfig]):
-    training_data = load_scenarios(split="train", limit=model.config.training_num_scenarios)
+    training_data = load_scenarios(split="train", limit=model.config.training_num_scenarios, difficulty=model.config.difficulty)
 
     with LocalBackend() as backend:
         await model.register(backend)
@@ -25,8 +25,8 @@ async def train(model: art.TrainableModel[RunConfig]):
             global_step = dataset_batch.step
             
             if global_step % model.config.validation_frequency == 0:
-                results, score = await benchmark(
-                    model, model.config.validation_num_scenarios,
+                results, score, accuracy = await benchmark(
+                    model, model.config.validation_num_scenarios, difficulty=model.config.difficulty
                 )
                 await model.log(results)
             groups = []

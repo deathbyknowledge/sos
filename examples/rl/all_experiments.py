@@ -8,7 +8,16 @@ models["run_1"] = art.TrainableModel[RunConfig](
     base_model="deathbyknowledge/Qwen2.5-3B-Shell-SFT",
     project="shell-agent",
     name="run_1",
-    config=RunConfig(),
+    config=RunConfig(
+        groups_per_step=4,
+        rollouts_per_group=8,
+        difficulty=1,
+        num_epochs=2,
+        learning_rate=1e-5,
+        validation_frequency=10,
+        validation_num_scenarios=20,
+        training_num_scenarios=508,
+    ),
 )
 
 models["run_2"] = models["run_1"].model_copy(deep=True)
