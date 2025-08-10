@@ -10,6 +10,8 @@ pub enum Error {
     NotStarted,
     #[error("Sandbox already started")]
     AlreadyStarted,
+    #[error("Sandbox session already exited")]
+    AlreadyExited,
     #[error("Setup commands failed: {0}")]
     SetupCommandsFailed(String),
     #[error("Failed to pull image")]
@@ -37,10 +39,12 @@ pub enum Error {
     TimeoutWaitingForMarker(String),
 }
 
+// TODO: capture exit code on exit command
 #[derive(Debug)]
 pub enum Status {
     Created,
     Started(String),     // container id
+    Exited(String), // Session exited but container is still running
     Stopped(Result<()>), // result of stop
 }
 
@@ -49,6 +53,7 @@ impl std::fmt::Display for Status {
         match self {
             Status::Created => write!(f, "created"),
             Status::Started(_) => write!(f, "started"),
+            Status::Exited(_) => write!(f, "exited"),
             Status::Stopped(_) => write!(f, "stopped"),
         }
     }
@@ -65,4 +70,5 @@ pub struct CommandExecution {
 pub struct CommandResult {
     pub output: String,
     pub exit_code: i64,
+    pub exited: bool,
 }

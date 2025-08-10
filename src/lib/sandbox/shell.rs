@@ -2,8 +2,11 @@ use const_format::{concatcp, formatcp};
 
 // Change this
 pub const UNIQUE_MARKER: &str = "TR0N-F1GHTS-4-TH3-U23R2";
+
 pub const PS1_MARKER: &str = formatcp!("#PS1-{}#:", UNIQUE_MARKER);
 pub const PS2_MARKER: &str = formatcp!("#PS2-{}#:", UNIQUE_MARKER);
+pub const EXIT_MARKER: &str = formatcp!("#EXIT-{}#:", UNIQUE_MARKER);
+
 const PS1: &str = formatcp!("{}$?:", PS1_MARKER); // Also includes the exit code
 const PS2: &str = formatcp!("{}", PS2_MARKER);
 
@@ -25,7 +28,7 @@ const READONLY_PROMPTS: &str = "readonly PS1; readonly PS2; ";
 
 // Overrides the default exit command to not exit the shell.
 // TODO: echo special marker on exit to terminate the session.
-const EXIT_COMMAND: &str = "exit() { return 0; }; export -f exit; ";
+const EXIT_COMMAND: &str = formatcp!("exit() {{ echo '{}'; return 0; }}; export -f exit; ", EXIT_MARKER);
 
 // Ignore EOF to prevent the shell from exiting when the input stream is closed.
 const IGNORE_EOF: &str = "set -o ignoreeof; ";

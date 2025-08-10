@@ -30,6 +30,7 @@ impl SandboxError {
         match self {
             SandboxError::NotStarted => StatusCode::BAD_REQUEST,
             SandboxError::AlreadyStarted => StatusCode::BAD_REQUEST,
+            SandboxError::AlreadyExited => StatusCode::BAD_REQUEST,
             SandboxError::SetupCommandsFailed(_) => StatusCode::BAD_REQUEST,
             SandboxError::PullImageFailed { .. } => StatusCode::BAD_REQUEST,
             SandboxError::StopContainerFailed(_) => StatusCode::BAD_REQUEST,
@@ -154,14 +155,15 @@ pub async fn exec_cmd(
     let mut sandbox_guard = sandbox_arc.lock().await;
     let standalone = payload.standalone.unwrap_or(false);
 
-    let CommandResult { output, exit_code } = match standalone {
+    let CommandResult { output, exit_code, exited } = match standalone {
         true => sandbox_guard.exec_standalone_cmd(command).await?,
         false => sandbox_guard.exec_session_cmd(command).await?,
     };
 
     Ok(Json(serde_json::json!({
         "output": output,
-        "exit_code": exit_code
+        "exit_code": exit_code,
+        "exited": exited
     })))
 }
 

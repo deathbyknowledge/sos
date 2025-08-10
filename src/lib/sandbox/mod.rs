@@ -257,7 +257,7 @@ impl Sandbox {
 
     async fn run_setup_commands(&mut self) -> Result<()> {
         if !self.setup_commands.is_empty() {
-            let CommandResult { output, exit_code } = self
+            let CommandResult { output, exit_code, exited: _ } = self
                 .exec_standalone_cmd(self.setup_commands.clone())
                 .await?;
             if exit_code != 0 {
@@ -340,61 +340,68 @@ impl Sandbox {
     }
 
     pub async fn exec_session_cmd(&mut self, cmd: String) -> Result<CommandResult> {
-        match self.status {
-            SandboxStatus::Started(_) => {
-                let execution_start = Instant::now();
-                let mut command_execution = CommandExecution {
-                    command: cmd.clone(),
-                    timestamp: execution_start,
-                    result: None,
-                };
+        let cid = match &self.status {
+            SandboxStatus::Started(cid) => cid.clone(),
+            SandboxStatus::Exited(_) => return Err(SandboxError::AlreadyExited),
+            _ => return Err(SandboxError::NotStarted),
+        };
 
-                // Write raw command
-                self.write_cmd(format!("{}\n", &cmd)).await?;
+        let execution_start = Instant::now();
+        let mut command_execution = CommandExecution {
+            command: cmd.clone(),
+            timestamp: execution_start,
+            result: None,
+        };
 
-                // Hint how many commands were executed by counting the number of newlines present.
-                // Might not be an exact match but it allows us to cut the timeout short.
-                let n_commands_hint = cmd.split('\n').count();
-                let output = match self
-                    .read_until_idle_after_marker(2.0, 0.2, n_commands_hint)
-                    .await
-                {
-                    Ok(s) => s,
+        // Write raw command
+        self.write_cmd(format!("{}\n", &cmd)).await?;
+
+        // Hint how many commands were executed by counting the number of newlines present.
+        // Might not be an exact match but it allows us to cut the timeout short.
+        let n_commands_hint = cmd.split('\n').count();
+        let output = match self
+            .read_until_idle_after_marker(2.0, 0.2, n_commands_hint)
+            .await
+        {
+            Ok(s) => s,
+            Err(SandboxError::TimeoutWaitingForMarker(_)) => {
+                // Step 1: try a newline to complete open constructs
+                self.write_cmd("\n".to_string()).await?;
+                match self.read_until_idle_after_marker(2.0, 0.2, 1).await {
+                    Ok(s2) => s2,
                     Err(SandboxError::TimeoutWaitingForMarker(_)) => {
-                        // Step 1: try a newline to complete open constructs
-                        self.write_cmd("\n".to_string()).await?;
-                        match self.read_until_idle_after_marker(2.0, 0.2, 1).await {
-                            Ok(s2) => s2,
-                            Err(SandboxError::TimeoutWaitingForMarker(_)) => {
-                                // Step 2: try Ctrl-D (safe due to 'set -o ignoreeof')
-                                self.write_cmd("\x04".to_string()).await?;
-                                // Final attempt to reach PS1
-                                self.read_until_idle_after_marker(2.0, 0.2, 1).await?
-                            }
-                            Err(e) => return Err(e),
-                        }
+                        // Step 2: try Ctrl-D (safe due to 'set -o ignoreeof')
+                        self.write_cmd("\x04".to_string()).await?;
+                        // Final attempt to reach PS1
+                        self.read_until_idle_after_marker(2.0, 0.2, 1).await?
                     }
                     Err(e) => return Err(e),
-                };
-
-                // Find all markers, remove them, and get last exit code (if input included multiple commands)
-                let (output, exit_code) = io::strip_markers_and_extract_exit_code(&output);
-
-                let result = CommandResult { output, exit_code };
-                command_execution.result = Some(result.clone());
-                self.trajectory.push(command_execution);
-
-                // Drain any remaining output to next prompt
-
-                Ok(result)
+                }
             }
-            _ => return Err(SandboxError::NotStarted),
+            Err(e) => return Err(e),
+        };
+
+        // Find all markers, remove them, and get last exit code (if input included multiple commands)
+        let (output, exit_code, exit_marker_seen) =
+            io::strip_markers_and_extract_exit_code(&output);
+
+        // Session was terminated by a command.
+        if exit_marker_seen {
+            self.status = SandboxStatus::Exited(cid.clone());
         }
+
+        let result = CommandResult { output, exit_code, exited: exit_marker_seen };
+        command_execution.result = Some(result.clone());
+        self.trajectory.push(command_execution);
+
+        // Drain any remaining output to next prompt
+
+        Ok(result)
     }
 
     pub async fn exec_standalone_cmd(&mut self, cmd: String) -> Result<CommandResult> {
         let cid = match &self.status {
-            SandboxStatus::Started(cid) => cid,
+            SandboxStatus::Started(cid) | SandboxStatus::Exited(cid) => cid,
             _ => return Err(SandboxError::NotStarted),
         };
         let exec_config = CreateExecOptions {
@@ -439,6 +446,7 @@ impl Sandbox {
         Ok(CommandResult {
             output: out_str,
             exit_code,
+            exited: false
         })
     }
 
@@ -449,7 +457,7 @@ impl Sandbox {
         return match &self.status {
             SandboxStatus::Stopped(_) => Err(SandboxError::NotStarted), // Already stopped
             SandboxStatus::Created => Err(SandboxError::NotStarted),
-            SandboxStatus::Started(cid) => {
+            SandboxStatus::Started(cid) | SandboxStatus::Exited(cid) => {
                 // Stop the container but don't remove it
                 let _ = self
                     .docker

@@ -528,3 +528,38 @@ async fn test_multiline_commands() {
 
     cleanup_sandbox(&client, &base_url, &sandbox_id).await;
 }
+
+#[tokio::test]
+async fn test_exit_command_response_includes_exit_true() {
+    let base_url = start_test_server().await;
+    let client = reqwest::Client::new();
+    let sandbox_id = create_and_start_sandbox(&client, &base_url).await;
+
+    let exec_result = execute_command(&client, &base_url, &sandbox_id, "echo hi; exit 7; echo bye", None).await;
+    assert_eq!(
+        exec_result.get("exited"),
+        Some(&serde_json::Value::Bool(true)),
+        "Response should include 'exit': true for 'echo hi; exit 7; echo bye'"
+    );
+    assert_eq!(
+        exec_result["output"], "hi",
+        "Output should include only 'hi'"
+    );
+
+    let exec_result = execute_command(&client, &base_url, &sandbox_id, "echo 'Container still running'", Some(true)).await;
+    assert_eq!(
+        exec_result["output"], "Container still running\n",
+        "Output should include 'Container still running'"
+    );
+    assert_eq!(
+        exec_result["exit_code"], 0,
+        "Exit code should be 0"
+    );
+    assert_eq!(
+        exec_result.get("exited"),
+        Some(&serde_json::Value::Bool(false)),
+        "Response should include 'exit': false for 'echo 'Container still running'"
+    );
+
+    cleanup_sandbox(&client, &base_url, &sandbox_id).await;
+}
