@@ -13,6 +13,9 @@ const PS2: &str = formatcp!("{}", PS2_MARKER);
 // Disables stdin from being echoe back to the terminal.
 const SILENCE_INPUT: &str = "stty -echo; ";
 
+// Capture exit code of pipes, good for reward shaping.
+const FAIL_ON_PIPE_FAILURE: &str = "set -o pipefail; ";
+
 // Disables bracketed paste mode which adds a lot of noise to the output.
 const DISABLE_BRACKETED_PASTE: &str = "bind 'set enable-bracketed-paste off'; ";
 
@@ -41,6 +44,7 @@ pub const CONF_CMD: &str = concatcp!(
     SET_PS2,
     READONLY_PROMPTS,
     EXIT_COMMAND,
+    FAIL_ON_PIPE_FAILURE,
     IGNORE_EOF,
     "\n"
 );

@@ -25,7 +25,7 @@ class ShellTrajectory(art.Trajectory):
     exit_codes: List[int]
     success_condition_passed: bool
     corrupted: bool
-    metrics: dict[str, float] = Field(default_factory=dict)
+    metrics: dict[str, float] = {}
 
 
 class RolloutConfig(BaseModel):
@@ -52,16 +52,24 @@ async def rollout(
         corrupted=False,
     )
 
-    system_prompt = scenario.task
+    system_prompt = """
+[POSIX MODE]
+Shell mode is enabled. User streams have been replaced with standard output and standard error streams.
+Outputs are not streamed to the user but piped directly to standard input. For reasoning traces, you can prepend with `#` so the shell treats them as comments.
+On startup, standard output will print the task. To signal the completion of your run, use `exit 0`.
+"""
 
-    traj.messages_and_choices = [{"role": "system", "content": system_prompt}]
+    traj.messages_and_choices = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": scenario.task},
+    ]
     traj.exit_codes = []
 
     await sos.start_sandbox(sandbox_id)
 
     async def finish_traj(sandbox_id: str, success_command: str) -> bool:
         try:
-            _, code = await sos.exec_command(
+            _, code, _ = await sos.exec_command(
                 sandbox_id, success_command, standalone=True
             )
             await sos.stop_sandbox(sandbox_id, remove=EPHEMERAL)
