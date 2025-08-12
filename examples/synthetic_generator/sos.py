@@ -100,9 +100,9 @@ class SoSClient:
       if response.status_code >= 400:
           self._raise_api_error(response, path, context=f"command={command}")
       parsed = response.json()
-      if "output" not in parsed or "exit_code" not in parsed:
+      if "output" not in parsed or "exit_code" not in parsed or "exited" not in parsed:
           raise SoSAPIError(response.status_code, f"Missing fields in response: {parsed}", path)
-      return parsed["output"], parsed["exit_code"]
+      return parsed["output"], parsed["exit_code"], parsed["exited"]
 
   async def stop_sandbox(self, sandbox_id, remove=True):
       """

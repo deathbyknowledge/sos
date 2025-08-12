@@ -111,7 +111,7 @@ def utc_now_iso() -> str:
 def append_jsonl(path: Path, obj: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({**obj, "setup_commands": [obj["setup_commands"]]}, ensure_ascii=False) + "\n")
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
 def load_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -149,12 +149,11 @@ async def generate_task(
 ) -> ShellTask:
     async def generate(template: str) -> str:
         messages = [{"role": "user", "content": template}]
-        async with llm_sem:
-            response = await client.chat.completions.create(
-                model=MODEL,
-                messages=messages,
-                temperature=temperature,
-            )
+        response = await client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            temperature=temperature,
+        )
         return response.choices[0].message.content or ""
 
     def _extract(pattern: str, text: str) -> Optional[str]:
@@ -189,17 +188,16 @@ async def generate_task(
 
 async def validate_task_setup(task: ShellTask) -> bool:
     """Validate setup commands run and success condition fails initially."""
-    async with sos_sem:
-        sid = await sos.create_sandbox(image="shellm-sandbox:latest", setup_commands=[task.setup_commands])
-        try:
-            await sos.start_sandbox(sid)  # Runs the setup commands, will raise if they fail
-            _, exit_code = await sos.exec_command(sid, task.success_condition, standalone=True)
-            return exit_code != 0  # Expect failure before agent acts
-        except Exception as e:
-            print("setup validation error:", e)
-            return False
-        finally:
-            await sos.stop_sandbox(sid, remove=True)
+    sid = await sos.create_sandbox(image="deathbyknowledge/shellm-sandbox:latest", setup_commands=[task.setup_commands])
+    try:
+        await sos.start_sandbox(sid)  # Runs the setup commands, will raise if they fail
+        _, exit_code, _ = await sos.exec_command(sid, task.success_condition, standalone=True)
+        return exit_code != 0  # Expect failure before agent acts
+    except Exception as e:
+        print("setup validation error:", e)
+        return False
+    finally:
+        await sos.stop_sandbox(sid, remove=True)
 
 
 async def validate_task_success(
@@ -241,12 +239,11 @@ async def solve(task: ShellTask) -> Tuple[bool, str]:
     @retry(stop=stop_after_attempt(3))
     async def generate(template: str) -> Tuple[str, str]:
         messages = [{"role": "user", "content": template}]
-        async with llm_sem:
-            response = await client.chat.completions.create(
-                model=MODEL,
-                messages=messages,
-                temperature=0.7,
-            )
+        response = await client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            temperature=0.7,
+        )
         message = response.choices[0].message.content
         if not message:
             raise ValueError("Failed to generate response")
@@ -256,34 +253,33 @@ async def solve(task: ShellTask) -> Tuple[bool, str]:
             raise ValueError("Failed to parse reasoning or command from response")
         return reasoning, command
 
-    async with sos_sem:
-        turn = 0
-        MAX_TURNS = 15
-        sid = await sos.create_sandbox(image="shellm-sandbox:latest", setup_commands=[task.setup_commands])
-        solved = False
-        history = "First turn, no history available yet."
-        try:
-            await sos.start_sandbox(sid)
-            while turn < MAX_TURNS:
-                turn += 1
-                template = SOLVER_TEMPLATE.format(task=task.task, history=history)
-                reasoning, command = await generate(template)
-                # Store reasoning as a comment line to keep a complete trajectory in the sandbox logs
-                await sos.exec_command(sid, f"# {reasoning}")
-                await sos.exec_command(sid, command)
-                history = await sos.get_sandbox_trajectory(sid, formatted=True)
-                if command == "exit 0":
-                    break
-        except Exception as e:
-            print("solver error:", e)
-        finally:
-            # history as JSON string for distillation (formatted=False)
-            traj = await sos.get_sandbox_trajectory(sid, formatted=False)
-            history = traj['trajectory']
-            _, exit_code = await sos.exec_command(sid, task.success_condition, standalone=True)
-            solved = exit_code == 0
-            await sos.stop_sandbox(sid, remove=False)
-        return solved, history
+    turn = 0
+    MAX_TURNS = 15
+    sid = await sos.create_sandbox(image="deathbyknowledge/shellm-sandbox:latest", setup_commands=[task.setup_commands])
+    solved = False
+    history = "First turn, no history available yet."
+    try:
+        await sos.start_sandbox(sid)
+        while turn < MAX_TURNS:
+            turn += 1
+            template = SOLVER_TEMPLATE.format(task=task.task, history=history)
+            reasoning, command = await generate(template)
+            # Store reasoning as a comment line to keep a complete trajectory in the sandbox logs
+            _, _, _ = await sos.exec_command(sid, f"# {reasoning}")
+            _, _, exited = await sos.exec_command(sid, command)
+            history = await sos.get_sandbox_trajectory(sid, formatted=True)
+            if exited:
+                break
+    except Exception as e:
+        print("solver error:", e)
+    finally:
+        # history as JSON string for distillation (formatted=False)
+        traj = await sos.get_sandbox_trajectory(sid, formatted=False)
+        history = traj['trajectory']
+        _, exit_code, _ = await sos.exec_command(sid, task.success_condition, standalone=True)
+        solved = exit_code == 0
+        await sos.stop_sandbox(sid, remove=False)
+    return solved, history
 
 
 async def process_seed_pair(
@@ -301,75 +297,68 @@ async def process_seed_pair(
     gen_temperature: float = 1.0,
 ) -> bool:
     """Process one seed pair into up to N validated + persisted candidates. Returns True if saved at least one."""
-    saved_any = False
 
-    for _ in range(candidates_per_pair):
-        try:
-            candidate = await generate_task(
-                seeds[0], seeds[1], difficulty,
-                temperature=gen_temperature,
-            )
-        except Exception as e:
-            print("generation error:", e)
-            continue
+    try:
+        candidate = await generate_task(
+            seeds[0], seeds[1], difficulty,
+            temperature=gen_temperature,
+        )
+    except Exception as e:
+        print("generation error:", e)
+        return False
 
-        nt = normalize_task_text(candidate.task)
+    nt = normalize_task_text(candidate.task)
 
-        # Reserve this task text to avoid duplicate work across workers
-        async with seen_lock:
-            if nt in seen_texts:
-                print("duplicate task text, skipping")
-                continue
-            seen_texts.add(nt)
+    # Reserve this task text to avoid duplicate work across workers
+    if nt in seen_texts:
+        print("duplicate task text, skipping")
+        return False
+    seen_texts.add(nt)
 
-        # Validate setup
-        if not await validate_task_setup(candidate):
-            print("setup invalid, skipping")
-            async with seen_lock:
-                seen_texts.discard(nt)
-            continue
+    # Validate setup
+    if not await validate_task_setup(candidate):
+        print("setup invalid, skipping")
+        seen_texts.discard(nt)
+        return False
 
-        # Validate solve-ability
-        passed, rollouts = await validate_task_success(candidate, k=k, threshold=threshold)
-        if not passed:
-            print("did not pass success threshold, skipping")
-            async with seen_lock:
-                seen_texts.discard(nt)
-            continue
+    # Validate solve-ability
+    passed, rollouts = await validate_task_success(candidate, k=k, threshold=threshold)
+    if not passed:
+        print("did not pass success threshold, skipping")
+        seen_texts.discard(nt)
 
-        # Persist (single-writer section)
-        task_id = short_id()
-        task_record = {
-            "id": task_id,
-            "task": candidate.task,
-            "setup_commands": candidate.setup_commands,
-            "success_condition": candidate.success_condition,
-            "difficulty_level": candidate.difficulty_level,
-            "k": k,
-            "threshold": threshold,
-            "timestamp": utc_now_iso(),
-        }
+    # Persist (single-writer section)
+    task_id = short_id()
+    task_record = {
+        "id": task_id,
+        "task": candidate.task,
+        "setup_commands": [candidate.setup_commands],
+        "success_condition": candidate.success_condition,
+        "difficulty_level": candidate.difficulty_level,
+        "k": k,
+        "threshold": threshold,
+        "timestamp": utc_now_iso(),
+    }
 
-        async with write_lock:
-            append_jsonl(tasks_path, task_record)
-            counts_by_diff[difficulty] = counts_by_diff.get(difficulty, 0) + 1
-            # Persist rollouts (all or only successful)
-            for i, r in enumerate(rollouts):
-                if save_all_rollouts or r.get("solved"):
-                    rollout_record = {
-                        "id": short_id(),
-                        "task_id": task_id,
-                        "attempt": i,
-                        "solved": bool(r.get("solved")),
-                        # history is a JSON string from SoS (formatted=False above)
-                        "history": r.get("history", ""),
-                        "difficulty_level": difficulty,
-                        "timestamp": utc_now_iso(),
-                    }
-                    append_jsonl(rollouts_path, rollout_record)
+    append_jsonl(tasks_path, task_record)
+    counts_by_diff[difficulty] = counts_by_diff.get(difficulty, 0) + 1
+    # Persist rollouts (all or only successful)
+    for i, r in enumerate(rollouts):
+        if save_all_rollouts or r.get("solved"):
+            rollout_record = {
+                "id": short_id(),
+                "task_id": task_id,
+                "attempt": i,
+                "solved": bool(r.get("solved")),
+                # history is a JSON string from SoS (formatted=False above)
+                "history": r.get("history", ""),
+                "difficulty_level": difficulty,
+                "timestamp": utc_now_iso(),
+            }
+            append_jsonl(rollouts_path, rollout_record)
 
-        print(f"saved task {task_id} (difficulty {difficulty}); total now {counts_by_diff[difficulty]}.")
-        saved_any = True
+    print(f"saved task {task_id} (difficulty {difficulty}); total now {counts_by_diff[difficulty]}.")
+    saved_any = True
 
     return saved_any
 
@@ -382,9 +371,6 @@ async def run_pipeline(
     threshold: float = 0.5,
     seed_step: int = 2,
     save_all_rollouts: bool = False,
-    *,
-    candidates_per_pair: int = 1,
-    gen_temperature: float = 1.0,
 ) -> None:
     out = Path(out_dir)
     tasks_path = out / "generated_tasks.jsonl"
@@ -408,6 +394,7 @@ async def run_pipeline(
         except Exception:
             difficulties = [1, 2, 3, 4]
 
+    # This is an example script, you'll want to parallelize this
     for difficulty in difficulties:
         target = tasks_per_difficulty
         have = counts_by_diff.get(difficulty, 0)
@@ -420,47 +407,20 @@ async def run_pipeline(
 
         # Keep going until we reach target for this difficulty
         while counts_by_diff.get(difficulty, 0) < target:
-            # Build a small batch of seed-pairs to try concurrently
-            batch: List[asyncio.Task] = []
-            remaining = target - counts_by_diff.get(difficulty, 0)
-            to_launch = min(MAX_PARALLEL_CANDIDATES, remaining)
-
-            for _ in range(to_launch):
-                seeds = get_seed_tasks(dataset, difficulty, offset)
-                if len(seeds) < 2:
-                    print(f"No more seed pairs at difficulty {difficulty} (offset={offset}).")
-                    break
-                batch.append(
-                    asyncio.create_task(
-                        process_seed_pair(
-                            seeds, difficulty, k, threshold, save_all_rollouts,
-                            tasks_path, rollouts_path, seen_texts, counts_by_diff,
-                            candidates_per_pair=candidates_per_pair,
-                            gen_temperature=gen_temperature,
-                        )
-                    )
-                )
-                offset += seed_step  # advance regardless to avoid getting stuck
-
-            if not batch:
+            seeds = get_seed_tasks(dataset, difficulty, offset)
+            if len(seeds) < 2:
+                print(f"No more seed pairs at difficulty {difficulty} (offset={offset}).")
                 break
+            await process_seed_pair(
+                seeds, difficulty, k, threshold, save_all_rollouts,
+                tasks_path, rollouts_path, seen_texts, counts_by_diff,
+            )
+            offset += seed_step  # advance regardless to avoid getting stuck
 
-            # Wait for the batch (errors handled/logged inside the worker)
-            await asyncio.gather(*batch, return_exceptions=True)
 
-
-BASE_URL = "https://api.deepseek.com/v1"
-API_KEY = os.getenv("DEEPSEEK_API_KEY")
+BASE_URL = os.getenv("BASE_URL", "https://api.deepseek.com/v1")
+API_KEY = os.getenv("API_KEY")
 MODEL = "deepseek-chat"
-MAX_PARALLEL_CANDIDATES = int(os.getenv("MAX_PARALLEL_CANDIDATES", "4")) # seed-pairs processed concurrently per difficulty
-LLM_CONCURRENCY = int(os.getenv("LLM_CONCURRENCY", "16")) # max concurrent LLM calls
-SANDBOX_CONCURRENCY = int(os.getenv("SANDBOX_CONCURRENCY", "16")) # max live sandboxes total (setup + solves)
-CANDIDATES_PER_PAIR = int(os.getenv("CANDIDATES_PER_PAIR", "2")) # how many tasks to generate per seed pair
-GEN_TEMPERATURE = float(os.getenv("GEN_TEMPERATURE", "1.0")) # temperature for generation diversity
-llm_sem = asyncio.Semaphore(LLM_CONCURRENCY)
-sos_sem = asyncio.Semaphore(SANDBOX_CONCURRENCY)
-seen_lock = asyncio.Lock() # protects seen_texts set
-write_lock = asyncio.Lock() # protects file writes & counters
 client = AsyncOpenAI(
     base_url=BASE_URL,
     api_key=API_KEY,
@@ -473,29 +433,23 @@ dataset = Dataset.from_list(dataset)
 sos = SoSClient(server_url="http://localhost:3000")
 
 """
-DEEPSEEK_API_KEY="YOUR_KEY" uv run examples/synthetic_generator/generation.py
+API_KEY="YOUR_KEY" BASE_URL="https://api.deepseek.com/v1" uv run examples/synthetic_generator/generation.py
 
-Tuning knobs (env vars):
-- MAX_PARALLEL_CANDIDATES: parallel seed-pairs per difficulty (default 3)
-- LLM_CONCURRENCY: max concurrent chat completions (default 8)
-- SANDBOX_CONCURRENCY: max live sandboxes (default 4)
-- CANDIDATES_PER_PAIR: number of tasks to generate per seed pair (default 1)
-- GEN_TEMPERATURE: generation temperature for diversity (default 1.0)
+
+Update the dataset to set custom seed tasks.
 """
 
+# TODO: dedup
 if __name__ == "__main__":
     async def main():
-        # Tune these as needed
         await run_pipeline(
             out_dir="data",
-            tasks_per_difficulty=20,
-            difficulties=[5],
+            tasks_per_difficulty=2,
+            difficulties=[1, 2],
             k=4,
             threshold=0.5,
             seed_step=1,
             save_all_rollouts=True,
-            candidates_per_pair=CANDIDATES_PER_PAIR,
-            gen_temperature=GEN_TEMPERATURE,
         )
 
     asyncio.run(main())

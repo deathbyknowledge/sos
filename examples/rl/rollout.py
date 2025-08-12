@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-LOCAL = os.getenv("LOCAL", "1") == "1"
+SHELLM= os.getenv("SHELLM", "1") == "1"
 EPHEMERAL = os.getenv("EPHEMERAL", "1") == "1"
 MAX_TURNS = int(os.getenv("MAX_TURNS", "30"))  # reasoning counts as 1 turn
 MAX_MODEL_TOKENS = int(os.getenv("MAX_MODEL_TOKENS", "32000"))
@@ -52,16 +52,17 @@ async def rollout(
         corrupted=False,
     )
 
-    system_prompt = """
-[POSIX MODE]
-Shell mode is enabled. User streams have been replaced with standard output and standard error streams.
-Outputs are not streamed to the user but piped directly to standard input. For reasoning traces, you can prepend with `#` so the shell treats them as comments.
-On startup, standard output will print the task. To signal the completion of your run, use `exit 0`.
-"""
+    system_prompt = f"""
+    [SHELL MODE]
+    Shell mode is enabled. User streams have been replaced with standard output and standard error streams.
+    Outputs are not streamed to the user but piped directly to standard input. For reasoning traces, you can prepend with `#` so the shell treats them as comments.
+    On startup, standard output will print the task. To signal the completion of your run, use `exit 0`.
+
+    TASK: {scenario.task}
+    """
 
     traj.messages_and_choices = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": scenario.task},
+        {"role": "system", "content": scenario.task if SHELLM else system_prompt},
     ]
     traj.exit_codes = []
 
@@ -88,9 +89,6 @@ On startup, standard output will print the task. To signal the completion of you
                 model=model.name,
                 temperature=config.temperature,
                 max_tokens=config.max_tokens,
-                # top_p=0.95,
-                # frequency_penalty=0.3,
-                # presence_penalty=0.1,
             )
 
             if (
@@ -105,9 +103,11 @@ On startup, standard output will print the task. To signal the completion of you
 
             return response.choices[0]
 
+        # TODO: This is a hack to estimate the token count. Find how to get
+        # the tokenizer from the ART model or get it manually.
         approx_token_count = 0
         for msg in traj.messages():
-            approx_token_count += len(msg["content"]) / 4
+            approx_token_count += len(msg["content"]) / 3
         if approx_token_count > MAX_MODEL_TOKENS:
             await finish_traj(sandbox_id, scenario.success_condition)
             traj.success_condition_passed = False
