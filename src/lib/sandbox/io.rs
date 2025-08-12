@@ -1,4 +1,4 @@
-use super::shell::{PS1_MARKER, PS2_MARKER};
+use super::shell::{PS1_MARKER, PS2_MARKER, EXIT_MARKER};
 use bytes::Bytes;
 use futures::{StreamExt, channel::mpsc::UnboundedReceiver};
 use strip_ansi_escapes::strip_str;
@@ -23,6 +23,7 @@ pub async fn read_stream_until_idle(
     let start = Instant::now();
 
     let mut markers_seen = 0;
+    let mut last_count = 0;
     loop {
         if start.elapsed().as_secs_f64() > overall_timeout {
             return Err(ReadError::OverallTimeout);
@@ -36,8 +37,10 @@ pub async fn read_stream_until_idle(
                 // split across multiple chunks. This normally happens if the command was multiline. To avoid
                 // having to rely on the idle timeout only to check for markers, we use the number of newlines
                 // in the input command as a hint to how many ouputs we should expect.
-                if OUTPUT_MARKER_REGEX.is_match(&accumulated) {
-                    markers_seen += 1;
+                let current_count = OUTPUT_MARKER_REGEX.find_iter(&accumulated).count();
+                if current_count > last_count {
+                    markers_seen += current_count - last_count; // More than one marker per chunk is possible
+                    last_count = current_count;
                     if markers_seen >= short_circuit_after_n_markers {
                         break;
                     }
@@ -60,10 +63,23 @@ pub async fn read_stream_until_idle(
     Ok(accumulated)
 }
 
-pub fn strip_markers_and_extract_exit_code(output: &str) -> (String, i64) {
+pub fn strip_markers_and_extract_exit_code(output: &str) -> (String, i64, bool) {
     let mut last_exit_code = -1i64;
     // First remove PS2 markers
     let mut cleaned = output.replace(&PS2_MARKER, "").to_string();
+    // Then remove EXIT markers
+    let mut exit_marker_seen = false;
+    if let Some(idx) = cleaned.find(&EXIT_MARKER) {
+        exit_marker_seen = true;
+        // Find the last OUTPUT_MARKER_REGEX match after EXIT_MARKER
+        if let Some(last_marker) = OUTPUT_MARKER_REGEX.find_iter(&cleaned).last() {
+            // Only include the last marker match itself (not all output up to it)
+            cleaned = cleaned[..idx].to_string() + last_marker.as_str();
+        } else {
+            // No marker after EXIT_MARKER, just cut at EXIT_MARKER
+            cleaned = cleaned[..idx].to_string();
+        }
+    }
 
     // Then strip output marker (PS1) and extract the exit code
     let mut matches = OUTPUT_MARKER_REGEX.captures_iter(&cleaned);
@@ -80,7 +96,7 @@ pub fn strip_markers_and_extract_exit_code(output: &str) -> (String, i64) {
     cleaned = cleaned.replace(&PS1_MARKER, "");
 
     cleaned = cleaned.trim_end().to_string();
-    (cleaned, last_exit_code)
+    (cleaned, last_exit_code, exit_marker_seen)
 }
 
 use lazy_static::lazy_static;

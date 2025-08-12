@@ -2,13 +2,19 @@ use const_format::{concatcp, formatcp};
 
 // Change this
 pub const UNIQUE_MARKER: &str = "TR0N-F1GHTS-4-TH3-U23R2";
+
 pub const PS1_MARKER: &str = formatcp!("#PS1-{}#:", UNIQUE_MARKER);
 pub const PS2_MARKER: &str = formatcp!("#PS2-{}#:", UNIQUE_MARKER);
+pub const EXIT_MARKER: &str = formatcp!("#EXIT-{}#:", UNIQUE_MARKER);
+
 const PS1: &str = formatcp!("{}$?:", PS1_MARKER); // Also includes the exit code
 const PS2: &str = formatcp!("{}", PS2_MARKER);
 
 // Disables stdin from being echoe back to the terminal.
 const SILENCE_INPUT: &str = "stty -echo; ";
+
+// Capture exit code of pipes, good for reward shaping.
+const FAIL_ON_PIPE_FAILURE: &str = "set -o pipefail; ";
 
 // Disables bracketed paste mode which adds a lot of noise to the output.
 const DISABLE_BRACKETED_PASTE: &str = "bind 'set enable-bracketed-paste off'; ";
@@ -25,7 +31,7 @@ const READONLY_PROMPTS: &str = "readonly PS1; readonly PS2; ";
 
 // Overrides the default exit command to not exit the shell.
 // TODO: echo special marker on exit to terminate the session.
-const EXIT_COMMAND: &str = "exit() { return 0; }; export -f exit; ";
+const EXIT_COMMAND: &str = formatcp!("exit() {{ echo '{}'; return 0; }}; export -f exit; ", EXIT_MARKER);
 
 // Ignore EOF to prevent the shell from exiting when the input stream is closed.
 const IGNORE_EOF: &str = "set -o ignoreeof; ";
@@ -38,6 +44,7 @@ pub const CONF_CMD: &str = concatcp!(
     SET_PS2,
     READONLY_PROMPTS,
     EXIT_COMMAND,
+    FAIL_ON_PIPE_FAILURE,
     IGNORE_EOF,
     "\n"
 );
