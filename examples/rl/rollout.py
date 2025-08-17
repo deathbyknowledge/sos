@@ -56,7 +56,7 @@ async def rollout(
     [SHELL MODE]
     Shell mode is enabled. User streams have been replaced with standard output and standard error streams.
     Outputs are not streamed to the user but piped directly to standard input. For reasoning traces, you can prepend with `#` so the shell treats them as comments.
-    On startup, standard output will print the task. To signal the completion of your run, use `exit 0`.
+    To signal the completion of your run, use `exit 0`.
 
     TASK: {scenario.task}
     """

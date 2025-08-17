@@ -6,7 +6,7 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    routing::post,
+    routing::{get, post},
 };
 use bollard::Docker;
 use futures::future::join_all;
@@ -320,6 +320,15 @@ pub async fn list_sandboxes(
     Ok(Json(sandbox_list))
 }
 
+/// GET `/health` handler.
+///
+/// Returns 200 status code.
+pub async fn health(
+    State(_): State<Arc<SoSState>>,
+) -> Result<(), (StatusCode, String)> {
+    Ok(())
+}
+
 /// Creates a new router for the SoS server.
 pub fn create_app(state: Arc<SoSState>) -> Router {
     Router::new()
@@ -328,12 +337,13 @@ pub fn create_app(state: Arc<SoSState>) -> Router {
         .route("/sandboxes/{id}/exec", post(exec_cmd))
         .route(
             "/sandboxes/{id}/trajectory",
-            axum::routing::get(get_trajectory),
+            get(get_trajectory),
         )
         .route(
             "/sandboxes/{id}/trajectory/formatted",
-            axum::routing::get(get_trajectory_formatted),
+            get(get_trajectory_formatted),
         )
         .route("/sandboxes/{id}/stop", post(stop_sandbox))
+        .route("/health", get(health))
         .with_state(state)
 }
